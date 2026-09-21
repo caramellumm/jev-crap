@@ -47,6 +47,9 @@ ambiente do processo — que é o que todo cliente MCP sabe passar.
 from __future__ import annotations
 
 import logging
+import math
+import sys
+from collections.abc import Mapping
 from typing import Annotated, Any
 
 from fastmcp import FastMCP
@@ -66,6 +69,15 @@ from jev_crap.situacoes import SituacaoConhecida
 __all__ = ["criar_servidor", "main"]
 
 _log = logging.getLogger(__name__)
+
+#: O que aparece no lugar de uma contagem que não pôde ser feita. Negativo de
+#: propósito: zero seria lido como "histórico vazio", e é justamente o oposto
+#: de "não consegui contar".
+SEM_CONTAGEM = -1
+
+#: Saída do processo quando o servidor não sobe por configuração. Combina com
+#: o 3 da CLI, que também é "erro de uso ou de configuração".
+ERRO_DE_CONFIGURACAO = 3
 
 VERSAO = "0.2.0"
 
@@ -135,15 +147,32 @@ def _normalizar_notas(notas: dict[str, Any] | None) -> dict[str, dict]:
     também é comum digitar ``{"teste_verifica": 0.4}``. Os dois viram o mesmo
     formato guardado, porque o módulo de aprendizado lê a série histórica
     inteira de uma vez e não pode encontrar dois formatos.
+
+    Nada aqui levanta. Tudo que vem do cliente MCP pode ter qualquer forma, e
+    o que não dá para interpretar é descartado silenciosamente: o episódio
+    ainda carrega risco, limiar, veredito e desfecho — os campos que sustentam
+    a calibração — e recusar o registro inteiro por causa de uma nota torta
+    perderia a série histórica para proteger um campo acessório.
     """
+    if not isinstance(notas, Mapping):
+        # `None` é o caso normal (episódio sem julgamento); qualquer outra coisa
+        # é o cliente mandando lista ou texto no lugar do bloco `notas`. Os dois
+        # viram histórico sem notas, que é verdade — e melhor que recusar o
+        # registro inteiro, porque risco, limiar e desfecho continuam valendo.
+        return {}
     normalizadas: dict[str, dict] = {}
-    for dimensao, bruto in (notas or {}).items():
-        if isinstance(bruto, dict):
+    for dimensao, bruto in notas.items():
+        if isinstance(bruto, Mapping):
             normalizadas[str(dimensao)] = dict(bruto)
-        elif isinstance(bruto, bool) or not isinstance(bruto, (int, float)):
             continue
-        else:
-            normalizadas[str(dimensao)] = {"normalizado": float(bruto), "confianca": None}
+        if isinstance(bruto, bool) or not isinstance(bruto, (int, float)):
+            continue
+        valor = float(bruto)
+        if not math.isfinite(valor):
+            # nan contamina qualquer média da série histórica depois, e o
+            # agregador não teria como apontar de qual episódio ele veio.
+            continue
+        normalizadas[str(dimensao)] = {"normalizado": valor, "confianca": None}
     return normalizadas
 
 
@@ -621,27 +650,145 @@ def _registrar(
     defeito: bool | None,
     id_episodio: str,
 ) -> dict[str, Any]:
+    """Grava um episódio novo, ou anexa o desfecho de um que já existe.
+
+    ``id_episodio`` é o que separa os dois verbos, e a separação evita o erro
+    mais caro deste módulo: um desfecho registrado como episódio novo cria uma
+    segunda linha com os mesmos números e o histórico passa a contar duas vezes
+    a mesma avaliação, inflando toda proporção que o laço de aprendizado
+    calcular depois.
+
+    Esta função é só o despacho: cada verbo tem a própria validação e a
+    própria mensagem de recusa, em :func:`_anexar_desfecho` e
+    :func:`_gravar_episodio_novo`. Juntá-los num corpo só fazia as duas
+    recusas compartilharem um caminho e obrigava quem lê a descobrir qual
+    metade da assinatura vale em cada caso.
+
+    **O que está em jogo se algo aqui falhar.** Nada do que já existe. O
+    histórico é append-only: toda gravação é uma linha nova no fim do arquivo,
+    nenhuma linha antiga é lida para ser reescrita, e uma falha no meio deixa o
+    arquivo exatamente como estava. Não há atualização em lugar, não há índice
+    para corromper, não há transação para ficar pela metade.
+
+    E o alcance é uma tool, não a ferramenta. ``registrar_episodio`` é um verbo
+    separado de ``avaliar_arquivos``: quando ele falha, o relatório já foi
+    entregue. O que se perde é uma linha de série histórica — a ferramenta
+    continua medindo, julgando e decidindo exatamente igual, só deixa de
+    acumular evidência para calibrar o limiar mais tarde. Nenhum veredito muda,
+    nenhum dado é exposto, nada é enviado para fora da máquina.
+    """
     repositorio = config.repositorio()
 
     if id_episodio:
-        try:
-            gravado = repositorio.registrar_desfecho(
-                id_episodio,
-                acao=acao,
-                aceita=aceita,
-                risco_depois=risco_depois,
-                defeito=defeito,
-            )
-        except KeyError as erro:
-            raise SituacaoConhecida(
-                "episodio_desconhecido",
-                f"não há episódio com id {id_episodio!r} no histórico deste projeto",
-                "Confira o id devolvido no registro original, ou registre um episódio novo "
-                "omitindo id_episodio.",
-                arquivo_do_historico=str(repositorio.caminho),
-            ) from erro
-        return _confirmacao(repositorio, gravado, "desfecho_registrado")
+        return _anexar_desfecho(
+            repositorio,
+            id_episodio,
+            acao=acao,
+            aceita=aceita,
+            risco_depois=risco_depois,
+            defeito=defeito,
+        )
+    return _gravar_episodio_novo(
+        config,
+        repositorio,
+        arquivo=arquivo,
+        funcao=funcao,
+        risco=risco,
+        conselho=conselho,
+        veredito=veredito,
+        nota=nota,
+        acao=acao,
+        aceita=aceita,
+        complexidade=complexidade,
+        cobertura_linha=cobertura_linha,
+        cobertura_branch=cobertura_branch,
+        limiar=limiar,
+        formula=formula,
+        notas=notas,
+        risco_depois=risco_depois,
+        defeito=defeito,
+    )
 
+
+def _anexar_desfecho(
+    repositorio: Repositorio,
+    id_episodio: str,
+    *,
+    acao: str | None,
+    aceita: bool | None,
+    risco_depois: float | None,
+    defeito: bool | None,
+) -> dict[str, Any]:
+    """Anexa o que se soube depois a um episódio já registrado.
+
+    Só os quatro campos de desfecho mudam: risco, limiar, fórmula e notas são
+    copiados do registro original de propósito, porque descrevem o que foi
+    medido naquele dia — e medição não se corrige retroativamente com
+    informação que ainda não existia.
+
+    O ``KeyError`` do repositório vira situação nomeada porque o caso comum
+    tem uma causa específica: o histórico é **por repositório**, e um id de
+    outro projeto não existe aqui. A mensagem traz o arquivo onde foi
+    procurado, que é o que faz a pessoa perceber isso.
+
+    Nada é reescrito: o desfecho entra como linha nova com o mesmo id.
+    Falhar aqui deixa o histórico exatamente como estava.
+    """
+    try:
+        gravado = repositorio.registrar_desfecho(
+            id_episodio,
+            acao=acao,
+            aceita=aceita,
+            risco_depois=risco_depois,
+            defeito=defeito,
+        )
+    except KeyError as erro:
+        raise SituacaoConhecida(
+            "episodio_desconhecido",
+            f"não há episódio com id {id_episodio!r} no histórico deste projeto",
+            "Confira o id devolvido no registro original, ou registre um episódio novo "
+            "omitindo id_episodio.",
+            arquivo_do_historico=str(repositorio.caminho),
+        ) from erro
+    return _confirmacao(repositorio, gravado, "desfecho_registrado")
+
+
+def _gravar_episodio_novo(
+    config: Config,
+    repositorio: Repositorio,
+    *,
+    arquivo: str,
+    funcao: str,
+    risco: float | None,
+    conselho: str,
+    veredito: str,
+    nota: float | None,
+    acao: str | None,
+    aceita: bool | None,
+    complexidade: int,
+    cobertura_linha: float,
+    cobertura_branch: float | None,
+    limiar: float | None,
+    formula: str,
+    notas: dict[str, Any] | None,
+    risco_depois: float | None,
+    defeito: bool | None,
+) -> dict[str, Any]:
+    """Grava a fotografia de uma avaliação, completando o que faltou.
+
+    Os três campos exigidos — arquivo, função e risco — são o mínimo que torna
+    o episódio comparável depois. Sem eles a linha entraria no histórico sem
+    poder ser cruzada com nada, e inflaria as contagens que o laço de
+    aprendizado usa para propor limiar.
+
+    O limiar vigente é preenchido da configuração quando não vem, e não fica
+    vazio: um episódio sem limiar não diz se a função estava acima ou abaixo da
+    régua da época, que é exatamente a pergunta que a calibração faz depois.
+
+    ``complexidade`` é elevada a 1 porque uma função sem desvio já tem um
+    caminho, e zero indicaria função não medida — que o histórico registraria
+    como a mais segura de todas.
+    """
     if not arquivo or not funcao or risco is None:
         raise SituacaoConhecida(
             "episodio_incompleto",
@@ -680,7 +827,24 @@ def _registrar(
 
 
 def _confirmacao(repositorio: Repositorio, gravado: Episodio, situacao: str) -> dict[str, Any]:
-    historico = repositorio.carregar()
+    """A resposta de um registro bem-sucedido, com a posição no histórico.
+
+    O ``id_episodio`` é o que importa: é com ele que o desfecho será anexado
+    semanas depois, e quem não o guardar terá de procurá-lo no JSONL à mão.
+
+    A releitura do histórico é protegida porque **a gravação já aconteceu**.
+    Um erro de disco aqui — arquivo que ficou ilegível, permissão trocada entre
+    a escrita e a leitura — faria a tool responder erro sobre um episódio que
+    está gravado, e quem chamou registraria de novo achando que falhou. A
+    contagem some da resposta; o registro, não.
+    """
+    try:
+        historico = repositorio.carregar()
+        episodios = len(historico)
+        linhas_invalidas = repositorio.linhas_invalidas
+    except OSError as erro:
+        _log.warning("episódio gravado, mas o histórico não pôde ser relido: %s", erro)
+        episodios = linhas_invalidas = SEM_CONTAGEM
     return {
         "situacao": situacao,
         "id_episodio": gravado.id,
@@ -691,23 +855,46 @@ def _confirmacao(repositorio: Repositorio, gravado: Episodio, situacao: str) -> 
         "defeito": gravado.defeito,
         "historico": {
             "arquivo": str(repositorio.caminho),
-            "episodios": len(historico),
-            "faltam_para_propor": max(0, MINIMO_EPISODIOS - len(historico)),
-            "linhas_invalidas": repositorio.linhas_invalidas,
+            "episodios": episodios,
+            "faltam_para_propor": (
+                SEM_CONTAGEM
+                if episodios == SEM_CONTAGEM
+                else max(0, MINIMO_EPISODIOS - episodios)
+            ),
+            "linhas_invalidas": linhas_invalidas,
         },
     }
 
 
 def _consultar(config: Config) -> dict[str, Any]:
+    """O que o histórico deste projeto mostra, e o que ele ainda não autoriza.
+
+    A distinção entre ``ok`` e ``ainda_sem_base`` é o ponto: abaixo de
+    :data:`MINIMO_EPISODIOS` as métricas continuam sendo devolvidas, mas com a
+    explicação de que servem para acompanhar e não para concluir. Esconder os
+    números convidaria a registrar episódios só para destravar a resposta;
+    devolvê-los sem a ressalva convidaria a concluir de três casos.
+
+    Histórico ilegível não é erro: quem pergunta ao aprendizado de um projeto
+    onde ninguém registrou nada — ou onde o arquivo ficou sem permissão de
+    leitura — recebe "ainda sem base" e o motivo, que é a resposta verdadeira.
+    Levantar aqui faria uma tool de consulta falhar por causa de um arquivo
+    opcional.
+    """
     repositorio = config.repositorio()
-    episodios = repositorio.carregar()
+    try:
+        episodios = repositorio.carregar()
+        linhas_invalidas = repositorio.linhas_invalidas
+    except OSError as erro:
+        _log.warning("histórico ilegível em %s: %s", repositorio.caminho, erro)
+        episodios, linhas_invalidas = [], 0
     metricas = agregar(episodios)
     propostas = propor(episodios)
 
     avisos = list(metricas["avisos"])
-    if repositorio.linhas_invalidas:
+    if linhas_invalidas:
         avisos.append(
-            f"{repositorio.linhas_invalidas} linha(s) do histórico estavam ilegíveis e foram "
+            f"{linhas_invalidas} linha(s) do histórico estavam ilegíveis e foram "
             "puladas; o resto do arquivo continua valendo"
         )
 
@@ -743,6 +930,12 @@ def main() -> None:
 
     O log vai para stderr de propósito: stdout é o canal do protocolo MCP, e
     qualquer coisa impressa lá corrompe a conversa com o cliente.
+
+    Falha na montagem vira mensagem em stderr e saída
+    :data:`ERRO_DE_CONFIGURACAO`, nunca traceback: o cliente MCP mata o processo
+    filho e descarta o que ele imprimiu de forma não estruturada, então um
+    servidor que morre calado aparece para a pessoa como "não conecta", sem
+    pista nenhuma de que o problema é a régua ou a configuração.
     """
     logging.basicConfig(level=logging.WARNING)
     # Um `.env` na raiz do projeto é o jeito mais comum de a chave existir na
@@ -750,7 +943,24 @@ def main() -> None:
     # então o que o cliente MCP passou na configuração não é sobrescrito — e é
     # por isso que carregar aqui é seguro, e não um atalho.
     carregar_env()
-    criar_servidor().run(show_banner=False)
+    try:
+        servidor = criar_servidor()
+    except SituacaoConhecida as erro:
+        # A montagem falhou por configuração — régua ilegível, quase sempre. O
+        # cliente MCP descarta o traceback de um processo filho que morre, então
+        # sem esta tradução a pessoa vê "o servidor não conecta" e nada mais.
+        print(erro.para_texto(), file=sys.stderr, flush=True)
+        raise SystemExit(ERRO_DE_CONFIGURACAO) from erro
+    except Exception as erro:  # noqa: BLE001 - morrer calado é o pior desfecho aqui
+        print(
+            f"jev-crap-mcp não subiu: {type(erro).__name__}: {erro}\n"
+            "Rode `jev-crap --diagnostico` para ver versão, dependências e onde a chave "
+            "foi procurada.",
+            file=sys.stderr,
+            flush=True,
+        )
+        raise SystemExit(ERRO_DE_CONFIGURACAO) from erro
+    servidor.run(show_banner=False)
 
 
 if __name__ == "__main__":  # pragma: no cover - conveniência de execução direta

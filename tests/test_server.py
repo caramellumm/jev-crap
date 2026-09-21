@@ -40,6 +40,25 @@ async def cliente(servidor):
         yield c
 
 
+class TestCriarServidor:
+    def test_criar_servidor_registra_as_seis_tools(self, config, rubrica):
+        servidor = criar_servidor(config, JulgadorDesligado(), rubrica)
+        assert servidor is not None
+
+    def test_criar_servidor_aceita_os_tres_por_injecao(self, config, rubrica):
+        assert criar_servidor(config, JulgadorFake(), rubrica) is not None
+
+    def test_criar_servidor_monta_sozinho_sem_argumento(self, monkeypatch, tmp_path):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+        assert criar_servidor() is not None
+
+    def test_criar_servidor_nao_toca_em_disco(self, config, rubrica, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        criar_servidor(config, JulgadorDesligado(), rubrica)
+        assert list(tmp_path.iterdir()) == []
+
+
 class TestSuperficie:
     async def test_expoe_exatamente_as_seis_tools(self, cliente):
         assert {t.name for t in await cliente.list_tools()} == TOOLS
