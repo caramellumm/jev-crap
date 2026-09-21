@@ -78,27 +78,46 @@ não um processo stdio parado esperando uma mensagem MCP que nunca chega.
 
 ## Registrando no cliente MCP
 
-Em todos os exemplos a chave entra por expansão do próprio cliente (`${VAR}`,
-`${env:VAR}`, `{env:VAR}`), para não gravar o segredo num arquivo versionado.
-Troque `/caminho/para/jev-crap` pelo caminho do seu clone.
+Troque `/caminho/para/jev-crap` pelo caminho do seu clone, e `sua_chave` pela
+chave de `console.typesafe.ai`.
+
+Onde a chave acaba depende da forma que você escolher, e a diferença importa:
+passá-la na linha de comando a grava no arquivo de configuração pessoal do
+cliente (fora do repositório, mas em texto claro e no histórico do shell),
+enquanto a expansão do próprio cliente (`${VAR}`, `${env:VAR}`, `{env:VAR}`)
+deixa o valor só no ambiente. As duas são legítimas; o que não pode é a chave
+entrar num arquivo versionado.
 
 ### Claude Code
 
-Pela linha de comando:
+Pela linha de comando, com a chave:
 
 ```bash
-claude mcp add --scope user --env TYPESAFE_API_KEY=$TYPESAFE_API_KEY \
-  jev-crap -- uv run --directory /caminho/para/jev-crap jev-crap-mcp
+claude mcp add --scope user --env TYPESAFE_API_KEY="sua_chave" jev-crap -- uv run --directory /caminho/para/jev-crap jev-crap-mcp
+```
+
+Ou sem ela, deixando o servidor procurar a chave onde ela já estiver:
+
+```bash
+claude mcp add --scope user jev-crap -- uv run --directory /caminho/para/jev-crap jev-crap-mcp
 ```
 
 Os escopos são `local` (só este projeto, privado), `project` (vai para o
 `.mcp.json` do repositório, compartilhado com o time) e `user` (todos os seus
 projetos). O `--` separa as opções do Claude Code do comando do servidor.
 
-O `--env` grava o valor **já resolvido** em `~/.claude.json`, que é pessoal e
-fica fora do repositório. Para não gravar a chave em arquivo nenhum, use o
-`.mcp.json` abaixo — o Claude Code expande `${VAR}` e `${VAR:-padrao}` em
-`command`, `args` e `env`:
+**Qual das duas usar.** O `--env` grava o valor da chave em `~/.claude.json`,
+que é pessoal e fica fora do repositório — é o caminho direto e o que funciona
+quando o Claude Code sobe o servidor sem herdar o seu shell. Sem o `--env`, o
+servidor procura `TYPESAFE_API_KEY` no ambiente que recebeu e, se não achar, num
+`.env` a partir do diretório do projeto; a chave então não fica gravada em
+arquivo de configuração nenhum. Sem chave em lugar algum, o eixo semântico
+apenas desliga: `medir_risco` continua funcionando, e `avaliar_arquivos` diz
+por que não há nota.
+
+Uma terceira forma, quando você quer a chave fora de arquivo **e** fora da linha
+de comando: o `.mcp.json` abaixo, onde o Claude Code expande `${VAR}` e
+`${VAR:-padrao}` em `command`, `args` e `env`:
 
 ```json
 {
