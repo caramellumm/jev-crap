@@ -389,19 +389,9 @@ class TestAvaliarCompleto:
         assert relatorio["resumo"]["julgadas"] == 1
         assert any("teto de 1 julgamentos" in a for a in relatorio["avisos"])
 
-    def test_uma_falha_nao_derruba_a_batelada(self, projeto, rubrica, monkeypatch):
+    def test_uma_falha_nao_derruba_a_batelada(self, projeto, rubrica):
         """Com `map`, uma exceção descartava tudo que já tinha sido pago."""
-        julgador = JulgadorFake(RESPOSTAS_BOAS)
-        chamadas = {"n": 0}
-        original = julgador.julgar
-
-        def as_vezes_falha(estado, regua):
-            chamadas["n"] += 1
-            if chamadas["n"] == 1:
-                raise RuntimeError("a primeira falhou")
-            return original(estado, regua)
-
-        monkeypatch.setattr(julgador, "julgar", as_vezes_falha)
+        julgador = JulgadorFake(RESPOSTAS_BOAS, falhar_nas=(1,))
         relatorio = avaliar(
             [str(projeto / "src")],
             config=Config(raiz=projeto),
@@ -413,12 +403,9 @@ class TestAvaliarCompleto:
         assert relatorio["resumo"]["julgadas"] == 2
         assert any(f["veredito"] != "sem_julgamento" for f in relatorio["funcoes"])
 
-    def test_falha_parcial_nao_sai_como_aprovar(self, projeto, rubrica, monkeypatch):
+    def test_falha_parcial_nao_sai_como_aprovar(self, projeto, rubrica):
         """O exit code é o que um CI lê; silêncio não pode virar sinal verde."""
-        julgador = JulgadorFake(RESPOSTAS_BOAS)
-        monkeypatch.setattr(
-            julgador, "julgar", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("caiu"))
-        )
+        julgador = JulgadorFake(RESPOSTAS_BOAS, levanta=RuntimeError("caiu"))
         relatorio = avaliar(
             [str(projeto / "src")],
             config=Config(raiz=projeto),

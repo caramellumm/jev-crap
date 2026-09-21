@@ -44,6 +44,35 @@ class SemCalcular(Formula):
     nome = "sem_calcular"
 
 
+class TestCoberturaPreferida:
+    """Branch quando existe, linha quando não: as duas contam coisas diferentes."""
+
+    def test_cobertura_preferida_usa_branch_quando_existe(self):
+        assert insumos(cobertura_linha=0.9, cobertura_branch=0.3).cobertura_preferida == 0.3
+
+    def test_cobertura_preferida_cai_na_linha_sem_branch(self):
+        assert insumos(cobertura_linha=0.9, cobertura_branch=None).cobertura_preferida == 0.9
+
+    def test_cobertura_preferida_trata_a_sentinela_como_ausencia(self):
+        preferida = insumos(cobertura_linha=0.9, cobertura_branch=SEM_DADOS).cobertura_preferida
+        assert preferida == 0.9
+
+    def test_cobertura_preferida_aceita_branch_zero(self):
+        """Zero é dado, não ausência: metade dos caminhos nunca exercitada."""
+        assert insumos(cobertura_linha=1.0, cobertura_branch=0.0).cobertura_preferida == 0.0
+
+    def test_cobertura_preferida_devolve_a_sentinela_quando_nao_ha_nada(self):
+        sem_nada = insumos(cobertura_linha=SEM_DADOS, cobertura_branch=None)
+        assert sem_nada.cobertura_preferida == SEM_DADOS
+
+    def test_cobertura_preferida_nao_levanta_em_nenhuma_combinacao(self):
+        for linha in (0.0, 0.5, 1.0, SEM_DADOS):
+            for branch in (0.0, 0.5, 1.0, None, SEM_DADOS):
+                assert insumos(
+                    cobertura_linha=linha, cobertura_branch=branch
+                ).cobertura_preferida is not None
+
+
 class TestContratoDeCalcular:
     """`calcular` visto dos dois lados: quem implementa e quem esquece.
 
@@ -54,6 +83,8 @@ class TestContratoDeCalcular:
 
     def test_calcular_devolve_numero_na_formula_implementada(self):
         assert isinstance(CrapClassico().calcular(insumos()), float)
+        assert CrapClassico().calcular(insumos(complexidade=5, cobertura_linha=0.0)) == 30.0
+        assert CrapClassico().calcular(insumos(complexidade=5, cobertura_linha=1.0)) == 5.0
 
     def test_calcular_levanta_quando_a_formula_nao_implementa(self):
         assert isinstance(CrapClassico().calcular(insumos()), float)
@@ -72,6 +103,12 @@ class TestContratoDeCalcular:
     def test_calcular_nunca_devolve_none_em_silencio(self):
         for formula in (CrapClassico(), Metade()):
             assert formula.calcular(insumos()) is not None
+
+    def test_calcular_trata_cobertura_ausente_como_o_pior_caso(self):
+        """Um número otimista esconderia exatamente o que se quer achar."""
+        sem_dado = CrapClassico().calcular(insumos(cobertura_linha=SEM_DADOS))
+        descoberta = CrapClassico().calcular(insumos(cobertura_linha=0.0))
+        assert sem_dado == descoberta
 
 
 @pytest.fixture(params=formulas_disponiveis())

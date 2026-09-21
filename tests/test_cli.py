@@ -21,6 +21,7 @@ from jev_crap.cli import (
     _sem_chave,
     principal,
 )
+from jev_crap.julgamento.jev import obter_julgador
 
 
 @pytest.fixture(autouse=True)
@@ -32,6 +33,41 @@ def sem_chave_no_ambiente(monkeypatch, tmp_path):
     """
     monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
     monkeypatch.chdir(tmp_path)
+
+
+class TestSelecaoDoJulgador:
+    """Qual julgador a CLI monta, e o que isso muda na saída.
+
+    A CLI pergunta a `obter_julgador` uma vez, antes de medir qualquer coisa —
+    é o que faz falta de chave sair como erro de configuração (3) em vez de
+    aparecer no meio de uma batelada já paga.
+    """
+
+    def test_sem_chave_obter_julgador_devolve_o_desligado(self, monkeypatch):
+        monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+        assert obter_julgador(ambiente={}).ativo is False
+
+    def test_com_chave_obter_julgador_devolve_o_ativo(self):
+        assert obter_julgador(ambiente={"TYPESAFE_API_KEY": "sk-x"}).ativo is True
+
+    def test_a_cli_recusa_rodar_com_o_julgador_desligado(self, projeto, capsys):
+        """Sem isto, um pipeline sairia 1 e passaria meses achando que avalia."""
+        assert principal([str(projeto / "src")]) == 3
+        assert "TYPESAFE_API_KEY" in capsys.readouterr().err
+
+    def test_a_cli_aceita_o_julgador_desligado_com_sem_julgamento(self, projeto):
+        assert principal([str(projeto / "src"), "--sem-julgamento"]) in (0, 1)
+
+    def test_a_cli_usa_o_julgador_que_obter_julgador_devolveu(self, monkeypatch, projeto):
+        from tests.conftest import RESPOSTAS_BOAS
+
+        from jev_crap import cli
+        from jev_crap.julgamento.jev import JulgadorFake
+
+        fake = JulgadorFake(RESPOSTAS_BOAS)
+        monkeypatch.setattr(cli, "obter_julgador", lambda: fake)
+        principal([str(projeto / "src"), "--limiar", "0", "--quieto"])
+        assert fake.chamadas
 
 
 class TestCodigosDeSaida:

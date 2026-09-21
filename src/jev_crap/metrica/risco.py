@@ -198,6 +198,13 @@ class Formula(Protocol):
         campo ``risco`` do relatório, atravessa o cruzamento com cobertura, a
         ordenação e o filtro por limiar, e só estoura na formatação — a dezenas
         de linhas e uma camada de distância da classe que esqueceu o método.
+
+        Este corpo não roda em produção. Ele só é alcançado por uma classe que
+        herda o protocolo e não implementa o método, o que estoura na primeira
+        chamada — em desenvolvimento, antes de qualquer arquivo ser medido.
+        ``CrapClassico`` implementa o método, ``obter_formula`` confere a
+        instância contra o protocolo antes de devolvê-la, e a suíte cobre as
+        duas coisas. Nada é lido, escrito ou enviado aqui.
         """
         raise NotImplementedError(
             f"{type(self).__name__} não implementa calcular(Insumos) -> float; "

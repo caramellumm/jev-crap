@@ -12,8 +12,12 @@ As três regras:
 2. **Construir não toca no mundo.** Nenhum `__init__` abre arquivo, cria
    diretório ou conexão. Perguntar ao histórico de um projeto onde ninguém
    registrou nada não pode deixar rastro nele.
-3. **Construir se explica.** Todo `__init__` tem docstring dizendo o que
+3. **Construir se explica.** Todo construtor tem docstring dizendo o que
    confere e por quê — é o único lugar onde a regra 1 fica registrada.
+
+As dataclasses do pacote seguem as mesmas três regras por `__post_init__`, que
+o construtor gerado chama no fim; elas têm os três primeiros testes deste
+arquivo, e não entram na tabela `CONSTRUTORES`.
 """
 
 from __future__ import annotations
@@ -27,6 +31,7 @@ from jev_crap.aprendizado.laco import Propostas
 from jev_crap.julgamento.jev import JulgadorDesligado, JulgadorFake, JulgadorJev
 from jev_crap.julgamento.rubrica import Rubrica, RubricaInvalida
 from jev_crap.metrica.cobertura import _Acumulador
+from jev_crap.metrica.risco import Insumos
 from jev_crap.situacoes import SituacaoConhecida
 
 REGUA_MINIMA = {
@@ -51,14 +56,15 @@ REGUA_MINIMA = {
 
 #: (classe, argumentos válidos, argumentos inválidos, exceção esperada).
 #: Acrescentar uma classe com `__init__` próprio é acrescentar uma linha aqui.
+#: `JulgadorFake` e `JulgadorDesligado` não entram: são dataclasses, o
+#: construtor delas é gerado e a validação mora em `__post_init__` — testada
+#: em tests/test_jev.py, junto do resto do comportamento delas.
 CONSTRUTORES = [
     (SituacaoConhecida, ("cobertura_ilegivel", "formato", "gere de novo"), ("", "y", "z"),
      ValueError),
     (Propostas, ([],), ({"tipo": "x"},), TypeError),
     (Repositorio, (), ("   ",), ValueError),
     (JulgadorJev, ("sk-chave",), ("   ",), ValueError),
-    (JulgadorFake, (), ([1, 2],), TypeError),
-    (JulgadorDesligado, (), ("   ",), ValueError),
     (Rubrica, (REGUA_MINIMA,), ("não é mapa",), RubricaInvalida),
     (_Acumulador, ("src/a.py",), ("  ",), ValueError),
 ]
@@ -66,44 +72,89 @@ CONSTRUTORES = [
 CLASSES = [linha[0] for linha in CONSTRUTORES]
 
 
+def test_post_init_de_cada_dataclass_recusa_a_propria_entrada_invalida():
+    """A regra 1 para as dataclasses, cujo construtor é gerado.
+
+    Elas não escrevem o próprio construtor: quem valida é `__post_init__`, que
+    o construtor gerado chama no fim. O contrato é o mesmo — uma instância que
+    existe é uma instância utilizável.
+    """
+    with pytest.raises(TypeError, match="mapa nome -> Resposta"):
+        JulgadorFake([1, 2])
+    with pytest.raises(ValueError, match="precisa de um motivo"):
+        JulgadorDesligado("   ")
+    with pytest.raises(ValueError, match="começa em 1"):
+        Insumos(complexidade=0, cobertura_linha=0.0, cobertura_branch=None, linhas_logicas=1)
+    with pytest.raises(ValueError, match="fração de 0 a 1"):
+        Insumos(complexidade=1, cobertura_linha=1.5, cobertura_branch=None, linhas_logicas=1)
+
+
+def test_post_init_de_cada_dataclass_normaliza_o_que_recebeu():
+    """O outro lado: `__post_init__` também põe as coleções na forma esperada."""
+    assert JulgadorFake().respostas == {}
+    assert JulgadorFake().usage == {"input_tokens": 0, "output_tokens": 0}
+    assert JulgadorFake(falhar_nas=[1, 2]).falhar_nas == (1, 2)
+    assert JulgadorDesligado("  sem chave  ").motivo == "sem chave"
+    assert Insumos(
+        complexidade=5, cobertura_linha=0.5, cobertura_branch=None, linhas_logicas=3
+    ).cobertura_preferida == 0.5
+
+
+def test_post_init_roda_mesmo_sem_argumento_nenhum():
+    """O construtor gerado chama `__post_init__` sempre, inclusive nos padrões."""
+    assert JulgadorFake().chamadas == []
+    assert JulgadorDesligado().motivo
+
+
 def test_init_de_cada_classe_recusa_a_propria_entrada_invalida():
     """A regra 1, escrita por extenso: cada `__init__` recusa o que não serve.
 
-    Por extenso e não em laço de propósito: quem lê precisa ver *o que* cada
-    construtor recusa, e uma tabela percorrida esconde exatamente isso.
+    Uma linha por classe, na ordem da tabela, para caber inteiro numa tela: o
+    que importa é ver *o que* cada construtor recusa e *com que mensagem*.
+    Casos adicionais de uma classe só ficam nos testes logo abaixo.
     """
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="não pode ser vazio"):
         SituacaoConhecida("", "explicação", "como resolver")
-    with pytest.raises(TypeError):
+    with pytest.raises(TypeError, match="lista de propostas"):
         Propostas({"tipo": "não é lista"})
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="não pode ser vazio"):
         Repositorio("   ")
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="chegou vazia"):
         JulgadorJev("   ")
-    with pytest.raises(TypeError):
-        JulgadorFake([1, 2])
-    with pytest.raises(ValueError):
-        JulgadorDesligado("   ")
-    with pytest.raises(RubricaInvalida):
+    with pytest.raises(RubricaInvalida, match="objeto JSON"):
         Rubrica("não é mapa")
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="sem nome de arquivo"):
         _Acumulador("  ")
 
 
 def test_init_de_cada_classe_aceita_a_propria_entrada_valida():
-    """O outro lado da regra 1: com entrada boa, cada `__init__` constrói."""
+    """O outro lado da regra 1: com entrada boa, cada `__init__` constrói.
+
+    Cada asserção confere um campo que o construtor *decidiu*, não apenas que
+    o objeto nasceu: chave normalizada, teto elevado ao mínimo, coleções
+    copiadas. Construir sem explodir é fácil; construir certo é o contrato.
+    """
+    assert JulgadorJev("  sk-chave  ")._chave == "sk-chave"
+    assert JulgadorJev("sk-chave", max_tentativas=0)._max_tentativas == 1
+    assert JulgadorJev("sk-chave")._cliente is None
+    assert JulgadorFake().respostas == {}
+    assert JulgadorFake().chamadas == []
+    assert JulgadorDesligado().motivo
+    assert JulgadorJev("sk-chave")._modelo
     assert SituacaoConhecida("cobertura_ilegivel", "formato", "gere de novo").situacao
     assert Propostas([], motivo="histórico curto").motivo
     assert Repositorio().caminho
-    assert JulgadorJev("sk-chave")._chave == "sk-chave"
-    assert JulgadorFake().respostas == {}
-    assert JulgadorDesligado().motivo
     assert Rubrica(REGUA_MINIMA).versao == "teste"
     assert _Acumulador("src/a.py").arquivo == "src/a.py"
 
 
 def test_init_de_cada_classe_explica_o_que_confere():
-    """A regra 3: o `__init__` é onde a validação fica documentada."""
+    """A regra 3: o `__init__` é onde a validação fica documentada.
+
+    Vale para as seis: SituacaoConhecida, Propostas, Repositorio, JulgadorJev,
+    Rubrica e _Acumulador. Sem a docstring, a regra 1 existe só no código e o
+    próximo a mexer não sabe que ela é intencional.
+    """
     for classe in CLASSES:
         assert (classe.__init__.__doc__ or "").strip(), classe.__name__
 
@@ -185,6 +236,15 @@ class TestRepositorioNaoDeixaRastro:
         repo = Repositorio(tmp_path / "fundo" / "h.jsonl")
         assert repo.carregar() == []
         assert not (tmp_path / "fundo").exists()
+
+
+def test_init_de_julgador_jev_confere_tambem_o_timeout():
+    """Casos extras do construtor mais parametrizado, fora do teste panorâmico."""
+    with pytest.raises(ValueError, match="maior que zero"):
+        JulgadorJev("sk-chave", timeout=0)
+    with pytest.raises(ValueError, match="maior que zero"):
+        JulgadorJev("sk-chave", timeout=-1)
+    assert JulgadorJev("sk-chave", max_tentativas=0)._max_tentativas == 1
 
 
 class TestJulgadorJevNaoAbreConexao:
