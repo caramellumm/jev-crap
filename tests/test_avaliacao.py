@@ -23,6 +23,7 @@ from jev_crap.avaliacao import (
 )
 from jev_crap.config import Config
 from jev_crap.julgamento.jev import JulgadorDesligado, JulgadorFake
+from jev_crap.julgamento.rubrica import GRUPO_QUALIDADE
 from jev_crap.metrica.cobertura import SEM_DADOS
 from jev_crap.situacoes import SituacaoConhecida
 
@@ -139,7 +140,8 @@ class TestNota:
 
     def test_sem_nenhuma_dimensao_a_nota_e_nula_e_nao_zero(self, medida, rubrica, config):
         """Zero significaria "péssimo"; None significa "não sei", que é o fato."""
-        so_risco = {k: v for k, v in RESPOSTAS_BOAS.items() if k not in rubrica.pesos}
+        com_peso = rubrica.do_grupo(GRUPO_QUALIDADE)
+        so_risco = {k: v for k, v in RESPOSTAS_BOAS.items() if k not in com_peso}
         assert decidida(medida, so_risco, config, rubrica).nota is None
 
     @pytest.mark.parametrize(
@@ -251,7 +253,7 @@ class TestPrioridade:
 
 class TestVeredito:
     def test_nota_abaixo_do_minimo_manda_revisar(self, medida, rubrica, config):
-        respostas = {**RESPOSTAS_BOAS, **{n: score(0.5) for n in rubrica.pesos}}
+        respostas = {**RESPOSTAS_BOAS, **{n: score(0.5) for n in rubrica.do_grupo(GRUPO_QUALIDADE)}}
         avaliada = decidida(medida, respostas, config, rubrica)
         assert avaliada.nota < config.nota_minima
         assert avaliada.veredito == "revisar"

@@ -101,6 +101,11 @@ class TestMontarEstado:
         assert montar_estado("x", "")["linguagem"] == "desconhecida"
 
 
+def _escala_degenerada(_nome, _valor):
+    """Uma régua cuja conversão de escala estoura — dimensão descartada, não o resto."""
+    raise ZeroDivisionError("régua com escala degenerada")
+
+
 def _explode_ao_fechar(_self) -> None:
     """Um `close` que levanta — acontece com transporte já morto."""
     raise RuntimeError("socket já morreu")
@@ -516,11 +521,8 @@ class TestParaResposta:
         bruta = {"type": "noul", "noul": 0.2, "confidence": 0.9}
         assert _para_resposta(bruta, rubrica, "injecao").confianca is None
 
-    def test_para_resposta_descarta_a_dimensao_se_normalizar_falhar(self, rubrica, monkeypatch):
-        def explode(_nome, _valor):
-            raise ZeroDivisionError("régua com escala degenerada")
-
-        monkeypatch.setattr(rubrica, "normalizar", explode)
+    def test_para_resposta_descarta_a_dimensao_se_a_escala_falhar(self, rubrica, monkeypatch):
+        monkeypatch.setattr(rubrica, "normalizar", _escala_degenerada)
         assert _para_resposta({"noul": 0.2}, rubrica, "injecao") is None
 
     def test_para_resposta_guarda_as_probabilidades_quando_vierem(self, rubrica):

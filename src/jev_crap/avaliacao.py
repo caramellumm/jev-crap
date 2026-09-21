@@ -596,7 +596,7 @@ def _gates(
 
     barrados = {g.split()[0] for g in graves}
     for nome, resposta in respostas.items():
-        if nome not in rubrica.risco or nome in barrados:
+        if nome not in rubrica.dimensoes_de_risco or nome in barrados:
             continue
         if resposta.normalizado >= config.suspeita:
             duvidas.append(f"{nome} {resposta.normalizado:.2f}")

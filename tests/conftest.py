@@ -9,6 +9,7 @@ em que roda.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -16,14 +17,14 @@ import pytest
 from jev_crap.avaliacao import FuncaoMedida
 from jev_crap.config import Config
 from jev_crap.julgamento.jev import JulgadorFake, Resposta
-from jev_crap.julgamento.rubrica import carregar_rubrica
+from jev_crap.julgamento.rubrica import ARQUIVO_PADRAO, Rubrica
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
-def score(bruto: float, confianca: float = 0.9, niveis: int = 3) -> Resposta:
+def score(bruto: float, confianca: float = 0.9, qtd_niveis: int = 3) -> Resposta:
     """Uma resposta de `score` como o extrator a produziria."""
-    return Resposta("score", bruto, bruto / (niveis - 1), confianca)
+    return Resposta("score", bruto, bruto / (qtd_niveis - 1), confianca)
 
 
 def noul(probabilidade: float) -> Resposta:
@@ -77,9 +78,20 @@ RESPOSTAS_REAIS: dict[str, Resposta] = {
 }
 
 
+#: O JSON da régua do pacote, lido uma vez por sessão de teste.
+_REGUA_BRUTA = json.loads(ARQUIVO_PADRAO.read_text(encoding="utf-8"))
+
+
 @pytest.fixture
 def rubrica():
-    return carregar_rubrica()
+    """Uma régua nova por teste, lida uma vez só do JSON do pacote.
+
+    A leitura acontece na importação (`_REGUA_BRUTA`), não a cada teste: ler e
+    validar o JSON mil vezes custa segundos de suíte sem verificar nada. Cada
+    teste ainda recebe um objeto próprio, porque vários deles trocam
+    `dimensoes` para montar um cenário.
+    """
+    return Rubrica(_REGUA_BRUTA)
 
 
 @pytest.fixture
