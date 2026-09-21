@@ -36,6 +36,7 @@ ausência (cair para cobertura de linha, avisar, ignorar).
 
 from __future__ import annotations
 
+import logging
 import os
 import posixpath
 import re
@@ -43,6 +44,8 @@ import xml.etree.ElementTree as ET
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Final
+
+_log = logging.getLogger(__name__)
 
 __all__ = [
     "SEM_DADOS",
@@ -87,22 +90,66 @@ class CoberturaArquivo:
 
     @property
     def tem_dados_de_branch(self) -> bool:
-        """Se o relatório trouxe informação de branch para este arquivo."""
+        """Se o relatório trouxe informação de branch para este arquivo.
+
+        A pergunta que este método responde é a diferença entre **zero branch
+        medido** e **nenhuma informação de branch**, e ela vale muito: no
+        primeiro caso a função não tem desvio, no segundo o gerador não emitiu
+        o dado. Confundi-los faz um arquivo sem informação aparecer como 0% de
+        branch — código bem testado descrito como descoberto.
+
+        É por isso que a ausência é :data:`SEM_DADOS` (-1) e não 0, e por isso
+        um ``branches_totais`` negativo diferente da sentinela é recusado: ele
+        só pode vir de aritmética errada em quem montou este objeto, e passaria
+        adiante como "sem dados" escondendo o defeito.
+
+        A recusa custa uma leitura, não a execução: ``jev_crap.avaliacao``
+        captura falha por função medida e a registra como sem dados de
+        cobertura. Nada é escrito, nada é enviado, e o único efeito é uma
+        função entrar no relatório sem o dado de branch — que é exatamente o
+        que ela teria se o gerador não o tivesse emitido.
+        """
+        if self.branches_totais < 0 and self.branches_totais != SEM_DADOS:
+            raise ValueError(
+                f"{self.arquivo}: branches_totais {self.branches_totais} é negativo sem ser "
+                f"a sentinela {SEM_DADOS}; ausência de dado e contagem errada não são a "
+                "mesma coisa"
+            )
         return self.branches_totais >= 0
 
     @property
     def cobertura_de_linha(self) -> float:
-        """Fração de linhas executáveis cobertas, ou :data:`SEM_DADOS` se não há linha."""
+        """Fração de linhas executáveis cobertas, ou :data:`SEM_DADOS` se não há linha.
+
+        A interseção com ``linhas_totais`` não é decoração: relatórios trazem
+        linha coberta que não consta como executável — concatenação de execuções
+        de versões diferentes do arquivo é a causa comum. Sem a interseção a
+        divisão passaria de 1.0, e uma cobertura de 130% atravessaria o
+        relatório inteiro parecendo excelente.
+
+        Arquivo sem linha executável devolve :data:`SEM_DADOS`, não 0.0: um
+        módulo só de constantes não é um módulo descoberto.
+        """
         if not self.linhas_totais:
             return float(SEM_DADOS)
         return len(self.linhas_cobertas & self.linhas_totais) / len(self.linhas_totais)
 
     @property
     def cobertura_de_branch(self) -> float:
-        """Fração de branches cobertos, ou :data:`SEM_DADOS` se não há branch medível."""
+        """Fração de branches cobertos, ou :data:`SEM_DADOS` se não há branch medível.
+
+        Zero total cai em :data:`SEM_DADOS` junto com a sentinela, e é o caso
+        honesto: arquivo sem desvio nenhum não tem cobertura de branch a
+        reportar — dizer 0% o descreveria como totalmente descoberto.
+
+        Mais cobertos que totais é contradição do relatório (mesma causa da
+        interseção em :attr:`cobertura_de_linha`) e é cortado em 1.0 em vez de
+        virar 1.4: o número segue para um cálculo de risco que supõe uma
+        fração, e acima de 1 ele produziria risco negativo.
+        """
         if self.branches_totais <= 0:
             return float(SEM_DADOS)
-        return self.branches_cobertos / self.branches_totais
+        return min(1.0, self.branches_cobertos / self.branches_totais)
 
 
 def cobertura_de_faixa(cob: CoberturaArquivo, inicio: int, fim: int) -> tuple[float, float]:
@@ -181,13 +228,55 @@ class _Acumulador:
         self.resumo_branch: tuple[int, int] | None = None
 
     def registrar_linha(self, linha: int, hits: int) -> None:
-        self.hits_por_linha[linha] = self.hits_por_linha.get(linha, 0) + hits
+        """Soma execuções de uma linha, acumulando entre registros repetidos.
+
+        Somar, e não substituir, é o que torna correto concatenar execuções: o
+        mesmo arquivo em dois registros traz as linhas de cada uma, e ficar com
+        a última perderia a cobertura da primeira.
+
+        Linha fora de faixa é ignorada em vez de registrada. Numeração começa
+        em 1, e um ``0`` (ou negativo) vem de relatório com deslocamento errado;
+        aceitá-lo criaria uma linha executável que não existe no arquivo, o que
+        baixa a cobertura de toda função que a contiver — uma punição por um
+        defeito do gerador.
+
+        ``hits`` negativo vira 0: no LCOV ele significa "bloco não alcançado",
+        e somá-lo reduziria a contagem de uma linha que outro registro viu
+        executar.
+        """
+        if linha < 1:
+            return
+        self.hits_por_linha[linha] = self.hits_por_linha.get(linha, 0) + max(0, hits)
 
     def registrar_branch_lcov(self, linha: int, bloco: str, branch: str, vezes: int) -> None:
-        chave = (linha, bloco, branch)
-        self.branches[chave] = max(self.branches.get(chave, 0), vezes)
+        """Registra um branch do LCOV, guardando o melhor resultado observado.
+
+        A chave ``(linha, bloco, branch)`` é o que evita contar o mesmo branch
+        duas vezes quando o arquivo aparece em registros repetidos — e ``max``,
+        em vez de soma, porque o que interessa é se aquele branch chegou a ser
+        exercitado alguma vez, não quantas.
+
+        Linha fora de faixa é ignorada pelo mesmo motivo de
+        :meth:`registrar_linha`: ela inventaria um desvio inexistente.
+        """
+        if linha < 1:
+            return
+        chave = (linha, str(bloco), str(branch))
+        self.branches[chave] = max(self.branches.get(chave, 0), max(0, vezes))
 
     def registrar_branch_resumido(self, linha: int, cobertos: int, totais: int) -> None:
+        """Registra o resumo por linha que o Cobertura XML dá no lugar do detalhe.
+
+        Valores incoerentes são normalizados aqui, não adiante: negativos viram
+        zero e ``cobertos`` acima de ``totais`` é cortado. Um par ``(3, 2)``
+        atravessaria a soma de :meth:`congelar` e sairia como cobertura de
+        branch acima de 100%, que o cálculo de risco leria como fração e
+        transformaria em risco negativo.
+        """
+        if linha < 1:
+            return
+        totais = max(0, totais)
+        cobertos = min(max(0, cobertos), totais)
         anterior = self.branches_por_linha.get(linha)
         if anterior is None:
             self.branches_por_linha[linha] = (cobertos, totais)
@@ -200,6 +289,19 @@ class _Acumulador:
         )
 
     def congelar(self) -> CoberturaArquivo:
+        """Fecha o acumulador num :class:`CoberturaArquivo` imutável.
+
+        A ordem de precedência do branch é o ponto: o detalhe (``BRDA`` do
+        LCOV, ``<condition>`` do XML) sempre vence o resumo (``BRF``/``BRH``),
+        e o resumo só entra quando não houve detalhe nenhum. A razão é que o
+        resumo é por registro: num arquivo que aparece em vários registros,
+        somá-los conta o mesmo branch mais de uma vez, enquanto o detalhe é
+        deduplicável pela chave.
+
+        Sem nenhum dos dois, os contadores de branch saem como
+        :data:`SEM_DADOS` — nunca zero, que seria lido como "nenhum branch
+        coberto" para um arquivo cujo relatório não mediu branch.
+        """
         totais = set(self.hits_por_linha)
         cobertas = {linha for linha, hits in self.hits_por_linha.items() if hits > 0}
 
@@ -227,7 +329,22 @@ class _Acumulador:
 
 
 def _congelar_todos(acumuladores: Mapping[str, _Acumulador]) -> dict[str, CoberturaArquivo]:
-    return {arquivo: acc.congelar() for arquivo, acc in acumuladores.items()}
+    """Fecha todos os acumuladores, deixando de fora o que não fecha.
+
+    Um arquivo cujo congelamento falha — contadores incoerentes que escaparam
+    das normalizações, ou um caminho que virou chave inválida — é registrado no
+    log e descartado. Deixar a exceção subir perderia a cobertura do
+    repositório inteiro por causa de um arquivo, e a consequência disso não é
+    um erro visível: é um relatório em que **todas** as funções aparecem como
+    descobertas, o que se lê como projeto ruim e não como relatório ilegível.
+    """
+    congelados: dict[str, CoberturaArquivo] = {}
+    for arquivo, acc in acumuladores.items():
+        try:
+            congelados[arquivo] = acc.congelar()
+        except Exception:  # noqa: BLE001 - um arquivo torto não zera o relatório
+            _log.warning("cobertura de %s ilegível; arquivo ignorado", arquivo)
+    return congelados
 
 
 # --------------------------------------------------------------------------- #
@@ -236,7 +353,20 @@ def _congelar_todos(acumuladores: Mapping[str, _Acumulador]) -> dict[str, Cobert
 
 
 def _limpar(bruto: str) -> str:
-    """Tira ruído de transporte: espaços, ``file://`` e barra invertida do Windows."""
+    """Tira ruído de transporte: espaços, ``file://`` e barra invertida do Windows.
+
+    Tudo que entra aqui veio de um arquivo de relatório gerado por outra
+    ferramenta, possivelmente em outro sistema operacional. Os três ruídos
+    tratados são os que aparecem na prática, e cada um deles impediria o
+    caminho de casar com o do analisador de complexidade — o que faz a função
+    sair como "sem cobertura" em vez de "não casou".
+
+    Valor que não é texto vira ``""`` em vez de levantar: o chamador já trata
+    caminho vazio como "não dá para casar", e derrubar a leitura do relatório
+    inteiro por um registro torto custaria a cobertura de todos os outros.
+    """
+    if not isinstance(bruto, str):
+        return ""
     caminho = bruto.strip().replace("\\", "/")
     if caminho.startswith("file://"):
         caminho = caminho[len("file://") :]
@@ -244,6 +374,19 @@ def _limpar(bruto: str) -> str:
 
 
 def _dentro(caminho: str, raiz: str) -> bool:
+    """Se ``caminho`` é a raiz ou está abaixo dela.
+
+    A barra no prefixo é o detalhe que decide: sem ela, ``/proj-antigo``
+    contaria como dentro de ``/proj``, e caminhos de outro checkout seriam
+    relativizados contra uma raiz que não é a deles — produzindo cobertura
+    atribuída ao arquivo errado, que é pior que cobertura não atribuída.
+
+    Raiz vazia devolve ``False`` para tudo, inclusive para caminho vazio: sem
+    raiz não há "dentro", e responder ``True`` faria o chamador relativizar
+    contra nada.
+    """
+    if not raiz or not caminho:
+        return False
     if caminho == raiz:
         return True
     prefixo = raiz if raiz.endswith("/") else raiz + "/"
@@ -268,7 +411,7 @@ def _normalizar_caminho(
         return caminho
 
     raiz_explicita = raiz is not None
-    raiz_norm = posixpath.normpath(_limpar(raiz if raiz is not None else os.getcwd()))
+    raiz_norm = posixpath.normpath(_limpar(raiz if raiz is not None else _cwd()))
 
     if posixpath.isabs(caminho):
         absoluto = posixpath.normpath(caminho)
@@ -294,16 +437,39 @@ def _normalizar_caminho(
 # --------------------------------------------------------------------------- #
 
 
+def _cwd() -> str:
+    """O diretório de trabalho, ou ``.`` quando ele não existe mais.
+
+    O processo pode rodar num diretório apagado — CI que limpa o workspace
+    entre passos faz isso. Levantar aqui derrubaria a leitura do relatório por
+    causa de um caminho que só seria usado como âncora.
+    """
+    try:
+        return os.getcwd()
+    except OSError:
+        return "."
+
+
 def _inteiro_lcov(valor: str) -> int:
-    """Lê um contador do LCOV, onde ``-`` significa "bloco nunca alcançado"."""
+    """Lê um contador do LCOV, onde ``-`` significa "bloco nunca alcançado".
+
+    Nunca levanta e nunca devolve negativo. Um relatório LCOV tem uma linha por
+    registro e é gerado por dezenas de ferramentas diferentes; recusar o arquivo
+    inteiro por causa de um contador estranho custaria a cobertura de tudo que
+    veio depois dele.
+    """
+    if not isinstance(valor, str):
+        return 0
     valor = valor.strip()
     if valor in {"", "-"}:
         return 0
     try:
-        return int(valor)
+        return max(0, int(valor))
     except ValueError:
         # gcov às vezes emite contadores gigantes com sufixo ou notação estranha;
-        # um valor ilegível vale mais como "não sei" do que como exceção.
+        # um valor ilegível vale mais como "não sei" do que como exceção. Zero é
+        # o "não sei" certo aqui: ele não inventa execução que não houve, e a
+        # linha continua contando como executável.
         return 0
 
 
@@ -319,9 +485,26 @@ def ler_lcov(caminho: str, *, raiz: str | None = None) -> dict[str, CoberturaArq
     ``BRF``/``BRH`` só entram quando não houve nenhum ``BRDA``: são somatórios
     por registro e, num arquivo que aparece em vários registros, somá-los conta
     o mesmo branch mais de uma vez. O detalhe do ``BRDA`` é deduplicável.
+
+    ``errors="replace"`` e ``utf-8-sig`` são sobre o que os geradores emitem na
+    prática: BOM vindo de ferramenta Windows e byte inválido num nome de
+    arquivo com acento. Recusar o relatório por causa de um byte custaria a
+    cobertura de tudo que veio depois dele.
+
+    Relatório sem nenhum arquivo é registrado no log em vez de passar calado.
+    O dicionário vazio é a resposta honesta — não há o que cruzar —, mas quem
+    o recebe não consegue distinguir "o relatório estava vazio" de "nenhum
+    caminho casou", e as duas pedem correções opostas.
+
+    A leitura não escreve nada. O que sobe daqui é erro de configuração
+    (``OSError``: caminho que virou diretório, permissão negada), traduzido em
+    situação conhecida por ``jev_crap.avaliacao.ler_cobertura``.
     """
     with open(caminho, encoding="utf-8-sig", errors="replace") as arquivo:
-        return _parse_lcov(arquivo, raiz)
+        cobertura = _parse_lcov(arquivo, raiz)
+    if not cobertura:
+        _log.warning("%s: LCOV sem nenhum registro SF; nenhum arquivo para cruzar", caminho)
+    return cobertura
 
 
 def _parse_lcov(linhas: Iterable[str], raiz: str | None) -> dict[str, CoberturaArquivo]:
@@ -411,6 +594,23 @@ def ler_cobertura_xml(caminho: str, *, raiz: str | None = None) -> dict[str, Cob
 
 
 def _parse_cobertura_xml(raiz_xml: ET.Element, raiz: str | None) -> dict[str, CoberturaArquivo]:
+    """Converte a árvore de um Cobertura XML em cobertura por arquivo.
+
+    Percorre ``<class>`` e não ``<package>`` porque linguagens com mais de uma
+    classe por arquivo emitem vários ``<class>`` com o mesmo ``filename``; o
+    acumulador por arquivo junta tudo antes de congelar, e olhar só o último
+    apagaria os anteriores.
+
+    Registro incompleto é pulado, nunca rejeitado: ``<class>`` sem
+    ``filename``, ``<line>`` sem ``number`` ou com número não numérico, e
+    ``condition-coverage`` fora do formato esperado. Um relatório de projeto
+    grande quase sempre tem alguma linha assim, e recusar o arquivo inteiro
+    trocaria a cobertura de milhares de linhas pela ausência de todas.
+
+    A única coisa recusada é a raiz errada: um XML que não é ``<coverage>`` não
+    é um relatório incompleto, é outro arquivo — e seguir produziria zero
+    arquivo sem dizer por quê.
+    """
     if raiz_xml.tag != "coverage":
         raise FormatoDeCoberturaDesconhecido(
             f"raiz XML esperada <coverage>, encontrada <{raiz_xml.tag}>"
@@ -438,11 +638,17 @@ def _parse_cobertura_xml(raiz_xml: ET.Element, raiz: str | None) -> dict[str, Co
 
             if linha.get("branch", "").strip().lower() != "true":
                 continue
-            achado = _CONDICOES.search(linha.get("condition-coverage", ""))
-            if achado is not None:
-                acc.registrar_branch_resumido(
-                    int(numero), int(achado.group(1)), int(achado.group(2))
-                )
+            achado = _CONDICOES.search(linha.get("condition-coverage") or "")
+            if achado is None:
+                continue
+            try:
+                cobertos, totais = int(achado.group(1)), int(achado.group(2))
+            except ValueError:
+                # O padrão já garante dígitos, mas um número absurdamente longo
+                # vindo de gerador quebrado ainda pode falhar na conversão. A
+                # linha continua contando como executável; só o branch se perde.
+                continue
+            acc.registrar_branch_resumido(int(numero), cobertos, totais)
 
     return _congelar_todos(acumuladores)
 
@@ -505,6 +711,14 @@ def ler(caminho: str, *, raiz: str | None = None) -> dict[str, CoberturaArquivo]
     dois — em vez de devolver dicionário vazio, que o chamador leria como
     "projeto sem cobertura" e transformaria um erro de configuração num
     relatório de risco falso.
+
+    Esta é uma leitura: nada é escrito, nada é enviado, nenhum relatório
+    anterior muda. O que sobe daqui é sempre erro de **configuração** — arquivo
+    que não existe, que não dá para ler, ou que não é relatório de cobertura —
+    e acontece na montagem, antes de qualquer função ser medida ou julgada.
+    ``jev_crap.avaliacao.ler_cobertura`` traduz cada um deles numa situação
+    conhecida com instrução de como resolver, que as duas entradas devolvem
+    como erro de uso (saída 3 na CLI, situação nomeada no MCP).
     """
     formato = _cheirar_formato(caminho)
     if formato == "lcov":

@@ -10,6 +10,8 @@ mesmo arquivo ficam em strings inline gravadas em ``tmp_path``.
 
 from __future__ import annotations
 
+import logging
+import os
 from pathlib import Path
 
 import pytest
@@ -18,6 +20,16 @@ from jev_crap.metrica.cobertura import (
     SEM_DADOS,
     CoberturaArquivo,
     FormatoDeCoberturaDesconhecido,
+    _Acumulador,
+    _cheirar_formato,
+    _congelar_todos,
+    _cwd,
+    _dentro,
+    _inteiro_lcov,
+    _limpar,
+    _normalizar_caminho,
+    _parse_cobertura_xml,
+    _parse_lcov,
     cobertura_de_faixa,
     ler,
     ler_cobertura_xml,
@@ -384,3 +396,539 @@ def test_cobertura_arquivo_sem_branches_por_linha_e_construivel_posicionalmente(
     cob = CoberturaArquivo("src/a.py", {1}, {1, 2}, SEM_DADOS, SEM_DADOS)
     assert cob.cobertura_de_linha == pytest.approx(0.5)
     assert cob.tem_dados_de_branch is False
+
+
+def _acc(arquivo: str = "src/a.py") -> _Acumulador:
+    return _Acumulador(arquivo)
+
+
+class TestTemDadosDeBranch:
+    """A diferença entre 'zero branch' e 'nenhuma informação de branch'."""
+
+    def cob(self, **ajustes) -> CoberturaArquivo:
+        campos = dict(
+            arquivo="src/a.py", linhas_cobertas={1}, linhas_totais={1, 2},
+            branches_cobertos=1, branches_totais=2,
+        )
+        return CoberturaArquivo(**{**campos, **ajustes})
+
+    def test_tem_dados_de_branch_com_contagem(self):
+        assert self.cob().tem_dados_de_branch is True
+
+    def test_tem_dados_de_branch_com_zero_branches_medidos(self):
+        """Zero é dado: o arquivo não tem desvio."""
+        assert self.cob(branches_cobertos=0, branches_totais=0).tem_dados_de_branch is True
+
+    def test_tem_dados_de_branch_falso_para_a_sentinela(self):
+        cob = self.cob(branches_cobertos=SEM_DADOS, branches_totais=SEM_DADOS)
+        assert cob.tem_dados_de_branch is False
+
+    def test_tem_dados_de_branch_recusa_negativo_que_nao_e_sentinela(self):
+        with pytest.raises(ValueError, match="negativo sem ser a sentinela"):
+            _ = self.cob(branches_totais=-7).tem_dados_de_branch
+
+    def test_tem_dados_de_branch_nomeia_o_arquivo_no_erro(self):
+        with pytest.raises(ValueError, match="src/a.py"):
+            _ = self.cob(branches_totais=-7).tem_dados_de_branch
+
+
+class TestCoberturaDeLinha:
+    def cob(self, **ajustes) -> CoberturaArquivo:
+        campos = dict(
+            arquivo="src/a.py", linhas_cobertas={1, 2}, linhas_totais={1, 2, 3, 4},
+            branches_cobertos=SEM_DADOS, branches_totais=SEM_DADOS,
+        )
+        return CoberturaArquivo(**{**campos, **ajustes})
+
+    def test_cobertura_de_linha_e_a_fracao_coberta(self):
+        assert self.cob().cobertura_de_linha == 0.5
+
+    def test_cobertura_de_linha_sem_linha_executavel_e_sem_dados(self):
+        """Módulo só de constantes não é módulo descoberto."""
+        assert self.cob(linhas_totais=set()).cobertura_de_linha == SEM_DADOS
+
+    def test_cobertura_de_linha_nunca_passa_de_um(self):
+        """Linha coberta que não consta como executável não pode dar 130%."""
+        cob = self.cob(linhas_cobertas={1, 2, 3, 4, 90, 91}, linhas_totais={1, 2})
+        assert cob.cobertura_de_linha == 1.0
+
+    def test_cobertura_de_linha_zero_quando_nada_foi_coberto(self):
+        assert self.cob(linhas_cobertas=set()).cobertura_de_linha == 0.0
+
+
+class TestCoberturaDeBranch:
+    def cob(self, **ajustes) -> CoberturaArquivo:
+        campos = dict(
+            arquivo="src/a.py", linhas_cobertas={1}, linhas_totais={1},
+            branches_cobertos=1, branches_totais=4,
+        )
+        return CoberturaArquivo(**{**campos, **ajustes})
+
+    def test_cobertura_de_branch_e_a_fracao_coberta(self):
+        assert self.cob().cobertura_de_branch == 0.25
+
+    def test_cobertura_de_branch_sem_branch_medivel_e_sem_dados(self):
+        assert self.cob(branches_totais=0).cobertura_de_branch == SEM_DADOS
+
+    def test_cobertura_de_branch_da_sentinela_e_sem_dados(self):
+        cob = self.cob(branches_cobertos=SEM_DADOS, branches_totais=SEM_DADOS)
+        assert cob.cobertura_de_branch == SEM_DADOS
+
+    def test_cobertura_de_branch_nunca_passa_de_um(self):
+        """Acima de 1 viraria risco negativo no cálculo que a consome."""
+        assert self.cob(branches_cobertos=9, branches_totais=4).cobertura_de_branch == 1.0
+
+
+class TestRegistrarLinha:
+    def test_registrar_linha_guarda_as_execucoes(self):
+        acc = _acc()
+        acc.registrar_linha(3, 2)
+        assert acc.hits_por_linha == {3: 2}
+
+    def test_registrar_linha_acumula_entre_registros(self):
+        """Ficar com a última perderia a cobertura da primeira execução."""
+        acc = _acc()
+        acc.registrar_linha(3, 1)
+        acc.registrar_linha(3, 2)
+        assert acc.hits_por_linha == {3: 3}
+
+    def test_registrar_linha_ignora_linha_zero(self):
+        acc = _acc()
+        acc.registrar_linha(0, 5)
+        assert acc.hits_por_linha == {}
+
+    def test_registrar_linha_ignora_linha_negativa(self):
+        acc = _acc()
+        acc.registrar_linha(-2, 5)
+        assert acc.hits_por_linha == {}
+
+    def test_registrar_linha_trata_hits_negativo_como_zero(self):
+        acc = _acc()
+        acc.registrar_linha(3, -4)
+        assert acc.hits_por_linha == {3: 0}
+
+    def test_registrar_linha_preserva_linha_executada_zero_vezes(self):
+        acc = _acc()
+        acc.registrar_linha(7, 0)
+        assert 7 in acc.hits_por_linha
+
+
+class TestRegistrarBranchLcov:
+    def test_registrar_branch_lcov_guarda_por_chave(self):
+        acc = _acc()
+        acc.registrar_branch_lcov(3, "0", "0", 1)
+        assert acc.branches == {(3, "0", "0"): 1}
+
+    def test_registrar_branch_lcov_nao_conta_o_mesmo_branch_duas_vezes(self):
+        acc = _acc()
+        acc.registrar_branch_lcov(3, "0", "0", 1)
+        acc.registrar_branch_lcov(3, "0", "0", 1)
+        assert len(acc.branches) == 1
+
+    def test_registrar_branch_lcov_fica_com_o_melhor_resultado(self):
+        acc = _acc()
+        acc.registrar_branch_lcov(3, "0", "0", 0)
+        acc.registrar_branch_lcov(3, "0", "0", 5)
+        assert acc.branches[(3, "0", "0")] == 5
+
+    def test_registrar_branch_lcov_ignora_linha_fora_de_faixa(self):
+        acc = _acc()
+        acc.registrar_branch_lcov(0, "0", "0", 1)
+        assert acc.branches == {}
+
+    def test_registrar_branch_lcov_trata_vezes_negativo_como_zero(self):
+        acc = _acc()
+        acc.registrar_branch_lcov(3, "0", "0", -1)
+        assert acc.branches[(3, "0", "0")] == 0
+
+
+class TestRegistrarBranchResumido:
+    def test_registrar_branch_resumido_guarda_o_par(self):
+        acc = _acc()
+        acc.registrar_branch_resumido(3, 1, 2)
+        assert acc.branches_por_linha == {3: (1, 2)}
+
+    def test_registrar_branch_resumido_fica_com_o_maior_de_cada(self):
+        acc = _acc()
+        acc.registrar_branch_resumido(3, 1, 2)
+        acc.registrar_branch_resumido(3, 2, 2)
+        assert acc.branches_por_linha[3] == (2, 2)
+
+    def test_registrar_branch_resumido_corta_cobertos_acima_de_totais(self):
+        """(3, 2) sairia como cobertura de branch acima de 100%."""
+        acc = _acc()
+        acc.registrar_branch_resumido(3, 3, 2)
+        assert acc.branches_por_linha[3] == (2, 2)
+
+    def test_registrar_branch_resumido_zera_negativos(self):
+        acc = _acc()
+        acc.registrar_branch_resumido(3, -1, -2)
+        assert acc.branches_por_linha[3] == (0, 0)
+
+    def test_registrar_branch_resumido_ignora_linha_fora_de_faixa(self):
+        acc = _acc()
+        acc.registrar_branch_resumido(0, 1, 2)
+        assert acc.branches_por_linha == {}
+
+
+class TestCongelar:
+    def test_congelar_devolve_cobertura_imutavel(self):
+        acc = _acc()
+        acc.registrar_linha(1, 1)
+        assert acc.congelar().arquivo == "src/a.py"
+
+    def test_congelar_separa_linhas_cobertas_de_totais(self):
+        acc = _acc()
+        acc.registrar_linha(1, 1)
+        acc.registrar_linha(2, 0)
+        congelada = acc.congelar()
+        assert congelada.linhas_cobertas == {1}
+        assert congelada.linhas_totais == {1, 2}
+
+    def test_congelar_sem_branch_usa_a_sentinela_e_nao_zero(self):
+        acc = _acc()
+        acc.registrar_linha(1, 1)
+        assert acc.congelar().branches_totais == SEM_DADOS
+
+    def test_congelar_prefere_o_detalhe_ao_resumo(self):
+        """O resumo é por registro e contaria o mesmo branch duas vezes."""
+        acc = _acc()
+        acc.registrar_branch_lcov(1, "0", "0", 1)
+        acc.resumo_branch = (99, 99)
+        assert acc.congelar().branches_totais == 1
+
+    def test_congelar_usa_o_resumo_quando_nao_ha_detalhe(self):
+        acc = _acc()
+        acc.resumo_branch = (3, 4)
+        congelada = acc.congelar()
+        assert (congelada.branches_cobertos, congelada.branches_totais) == (3, 4)
+
+
+class TestCongelarTodos:
+    def test_congelar_todos_fecha_cada_acumulador(self):
+        acc = _acc()
+        acc.registrar_linha(1, 1)
+        assert set(_congelar_todos({"src/a.py": acc})) == {"src/a.py"}
+
+    def test_congelar_todos_descarta_o_que_nao_fecha(self, caplog):
+        quebrado = _acc("src/b.py")
+        quebrado.hits_por_linha = "não é dicionário"
+        with caplog.at_level(logging.WARNING, logger="jev_crap.metrica.cobertura"):
+            resultado = _congelar_todos({"src/b.py": quebrado})
+        assert resultado == {}
+        assert "src/b.py" in caplog.text
+
+    def test_congelar_todos_preserva_os_outros_arquivos(self):
+        bom = _acc("src/a.py")
+        bom.registrar_linha(1, 1)
+        quebrado = _acc("src/b.py")
+        quebrado.hits_por_linha = "não é dicionário"
+        assert set(_congelar_todos({"a": bom, "b": quebrado})) == {"a"}
+
+    def test_congelar_todos_de_nada_e_vazio(self):
+        assert _congelar_todos({}) == {}
+
+
+class TestLimpar:
+    def test_limpar_tira_espacos(self):
+        assert _limpar("  src/a.py  ") == "src/a.py"
+
+    def test_limpar_troca_barra_invertida(self):
+        assert _limpar("src\\a.py") == "src/a.py"
+
+    def test_limpar_tira_o_esquema_de_arquivo(self):
+        assert _limpar("file:///tmp/a.py") == "/tmp/a.py"
+
+    def test_limpar_devolve_vazio_para_o_que_nao_e_texto(self):
+        assert _limpar(None) == ""
+
+    def test_limpar_de_vazio_e_vazio(self):
+        assert _limpar("   ") == ""
+
+
+class TestDentro:
+    def test_dentro_aceita_o_proprio_caminho(self):
+        assert _dentro("/proj", "/proj")
+
+    def test_dentro_aceita_subcaminho(self):
+        assert _dentro("/proj/src/a.py", "/proj")
+
+    def test_dentro_recusa_irmao_com_prefixo_parecido(self):
+        """Sem a barra, /proj-antigo contaria como dentro de /proj."""
+        assert not _dentro("/proj-antigo/a.py", "/proj")
+
+    def test_dentro_aceita_raiz_com_barra_no_fim(self):
+        assert _dentro("/proj/a.py", "/proj/")
+
+    def test_dentro_recusa_raiz_vazia(self):
+        assert not _dentro("/proj/a.py", "")
+
+    def test_dentro_recusa_caminho_vazio(self):
+        assert not _dentro("", "/proj")
+
+
+class TestInteiroLcov:
+    def test_inteiro_lcov_le_um_numero(self):
+        assert _inteiro_lcov("42") == 42
+
+    def test_inteiro_lcov_trata_traco_como_zero(self):
+        assert _inteiro_lcov("-") == 0
+
+    def test_inteiro_lcov_trata_vazio_como_zero(self):
+        assert _inteiro_lcov("") == 0
+
+    def test_inteiro_lcov_trata_ilegivel_como_zero(self):
+        assert _inteiro_lcov("12abc") == 0
+
+    def test_inteiro_lcov_nunca_devolve_negativo(self):
+        assert _inteiro_lcov("-5") == 0
+
+    def test_inteiro_lcov_aceita_espacos_em_volta(self):
+        assert _inteiro_lcov("  7 ") == 7
+
+    def test_inteiro_lcov_nunca_levanta(self):
+        for bruto in ("", "-", "x", None, "999999999999999999999999"):
+            assert _inteiro_lcov(bruto) >= 0
+
+
+class TestCwd:
+    def test_cwd_devolve_o_diretorio_atual(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        assert _cwd() == os.getcwd()
+
+    def test_cwd_cai_no_ponto_quando_o_diretorio_sumiu(self, monkeypatch):
+        def explode():
+            raise FileNotFoundError("workspace apagado")
+
+        monkeypatch.setattr(os, "getcwd", explode)
+        assert _cwd() == "."
+
+
+
+class TestNormalizarCaminho:
+    """O caminho do relatório precisa casar com o do analisador de complexidade."""
+
+    def test_normalizar_caminho_relativiza_absoluto_dentro_da_raiz(self):
+        assert _normalizar_caminho("/proj/src/a.py", "/proj") == "src/a.py"
+
+    def test_normalizar_caminho_preserva_absoluto_fora_da_raiz(self):
+        assert _normalizar_caminho("/outro/a.py", "/proj") == "/outro/a.py"
+
+    def test_normalizar_caminho_sem_raiz_devolve_o_relativo_como_veio(self):
+        """Ancorar numa base qualquer produziria um absoluto de outra máquina."""
+        assert _normalizar_caminho("src/a.py", None) == "src/a.py"
+
+    def test_normalizar_caminho_usa_a_base_declarada_pelo_relatorio(self):
+        assert _normalizar_caminho("src/a.py", "/proj", ["/proj"]) == "src/a.py"
+
+    def test_normalizar_caminho_ignora_base_que_sai_da_raiz(self):
+        assert _normalizar_caminho("src/a.py", "/proj", ["/outro"]) == "src/a.py"
+
+    def test_normalizar_caminho_limpa_o_esquema_de_arquivo(self):
+        assert _normalizar_caminho("file:///proj/src/a.py", "/proj") == "src/a.py"
+
+    def test_normalizar_caminho_de_vazio_e_vazio(self):
+        assert _normalizar_caminho("   ", "/proj") == ""
+
+    def test_normalizar_caminho_nao_levanta_sem_diretorio_de_trabalho(self, monkeypatch):
+        def explode():
+            raise OSError("workspace apagado")
+
+        monkeypatch.setattr(os, "getcwd", explode)
+        assert _normalizar_caminho("src/a.py", None) == "src/a.py"
+
+
+class TestParseLcov:
+    def test_parse_lcov_le_um_registro_simples(self):
+        linhas = ["SF:src/a.py", "DA:1,1", "DA:2,0", "end_of_record"]
+        cob = _parse_lcov(linhas, None)["src/a.py"]
+        assert cob.linhas_cobertas == {1}
+        assert cob.linhas_totais == {1, 2}
+
+    def test_parse_lcov_junta_o_mesmo_arquivo_em_dois_registros(self):
+        linhas = ["SF:src/a.py", "DA:1,1", "end_of_record",
+                  "SF:src/a.py", "DA:2,1", "end_of_record"]
+        assert _parse_lcov(linhas, None)["src/a.py"].linhas_cobertas == {1, 2}
+
+    def test_parse_lcov_le_o_detalhe_de_branch(self):
+        linhas = ["SF:src/a.py", "DA:1,1", "BRDA:1,0,0,1", "BRDA:1,0,1,-", "end_of_record"]
+        cob = _parse_lcov(linhas, None)["src/a.py"]
+        assert (cob.branches_cobertos, cob.branches_totais) == (1, 2)
+
+    def test_parse_lcov_usa_o_resumo_so_sem_detalhe(self):
+        linhas = ["SF:src/a.py", "DA:1,1", "BRF:4", "BRH:2", "end_of_record"]
+        cob = _parse_lcov(linhas, None)["src/a.py"]
+        assert (cob.branches_cobertos, cob.branches_totais) == (2, 4)
+
+    def test_parse_lcov_ignora_registro_desconhecido(self):
+        linhas = ["SF:src/a.py", "FN:1,f", "FNDA:3,f", "DA:1,1", "end_of_record"]
+        assert _parse_lcov(linhas, None)["src/a.py"].linhas_totais == {1}
+
+    def test_parse_lcov_ignora_linha_malformada(self):
+        linhas = ["SF:src/a.py", "DA:isto,nao,e,numero", "DA:1,1", "end_of_record"]
+        assert _parse_lcov(linhas, None)["src/a.py"].linhas_totais == {1}
+
+    def test_parse_lcov_de_nada_e_vazio(self):
+        assert _parse_lcov([], None) == {}
+
+    def test_parse_lcov_sem_branch_usa_a_sentinela(self):
+        linhas = ["SF:src/a.py", "DA:1,1", "end_of_record"]
+        assert _parse_lcov(linhas, None)["src/a.py"].branches_totais == SEM_DADOS
+
+
+class TestParseCoberturaXml:
+    def arvore(self, corpo: str):
+        import xml.etree.ElementTree as ET
+
+        return ET.fromstring(corpo)
+
+    def test_parse_cobertura_xml_le_linhas(self):
+        arvore = self.arvore(
+            '<coverage><packages><package><classes>'
+            '<class filename="src/a.py"><lines>'
+            '<line number="1" hits="1"/><line number="2" hits="0"/>'
+            "</lines></class></classes></package></packages></coverage>"
+        )
+        cob = _parse_cobertura_xml(arvore, None)["src/a.py"]
+        assert cob.linhas_cobertas == {1}
+
+    def test_parse_cobertura_xml_recusa_raiz_errada(self):
+        with pytest.raises(FormatoDeCoberturaDesconhecido, match="esperada <coverage>"):
+            _parse_cobertura_xml(self.arvore("<testsuite/>"), None)
+
+    def test_parse_cobertura_xml_junta_classes_do_mesmo_arquivo(self):
+        arvore = self.arvore(
+            '<coverage><class filename="src/a.py"><lines><line number="1" hits="1"/>'
+            '</lines></class><class filename="src/a.py"><lines>'
+            '<line number="2" hits="1"/></lines></class></coverage>'
+        )
+        assert _parse_cobertura_xml(arvore, None)["src/a.py"].linhas_cobertas == {1, 2}
+
+    def test_parse_cobertura_xml_pula_classe_sem_filename(self):
+        arvore = self.arvore('<coverage><class><lines><line number="1" hits="1"/>'
+                             "</lines></class></coverage>")
+        assert _parse_cobertura_xml(arvore, None) == {}
+
+    def test_parse_cobertura_xml_pula_linha_sem_numero(self):
+        arvore = self.arvore('<coverage><class filename="src/a.py"><lines>'
+                             '<line hits="1"/></lines></class></coverage>')
+        assert _parse_cobertura_xml(arvore, None)["src/a.py"].linhas_totais == set()
+
+    def test_parse_cobertura_xml_le_condition_coverage(self):
+        arvore = self.arvore(
+            '<coverage><class filename="src/a.py"><lines>'
+            '<line number="1" hits="1" branch="true" condition-coverage="50% (1/2)"/>'
+            "</lines></class></coverage>"
+        )
+        cob = _parse_cobertura_xml(arvore, None)["src/a.py"]
+        assert (cob.branches_cobertos, cob.branches_totais) == (1, 2)
+
+    def test_parse_cobertura_xml_ignora_condition_coverage_torto(self):
+        arvore = self.arvore(
+            '<coverage><class filename="src/a.py"><lines>'
+            '<line number="1" hits="1" branch="true" condition-coverage="parcial"/>'
+            "</lines></class></coverage>"
+        )
+        assert _parse_cobertura_xml(arvore, None)["src/a.py"].branches_totais == SEM_DADOS
+
+
+class TestCheirarFormato:
+    def escrever(self, tmp_path, nome, conteudo):
+        alvo = tmp_path / nome
+        alvo.write_text(conteudo, encoding="utf-8")
+        return str(alvo)
+
+    def test_cheirar_formato_reconhece_lcov_por_sf(self, tmp_path):
+        assert _cheirar_formato(self.escrever(tmp_path, "x.dat", "SF:a.py\n")) == "lcov"
+
+    def test_cheirar_formato_reconhece_lcov_por_tn(self, tmp_path):
+        assert _cheirar_formato(self.escrever(tmp_path, "x.dat", "TN:\nSF:a.py\n")) == "lcov"
+
+    def test_cheirar_formato_reconhece_xml_pela_raiz(self, tmp_path):
+        caminho = self.escrever(tmp_path, "x.dat", '<?xml version="1.0"?><coverage/>')
+        assert _cheirar_formato(caminho) == "cobertura-xml"
+
+    def test_cheirar_formato_recusa_xml_de_outra_raiz(self, tmp_path):
+        caminho = self.escrever(tmp_path, "x.xml", "<testsuite/>")
+        with pytest.raises(FormatoDeCoberturaDesconhecido, match="esperado <coverage>"):
+            _cheirar_formato(caminho)
+
+    def test_cheirar_formato_usa_a_extensao_como_desempate(self, tmp_path):
+        assert _cheirar_formato(self.escrever(tmp_path, "x.info", "")) == "lcov"
+
+    def test_cheirar_formato_reconhece_lcov_que_comeca_por_da(self, tmp_path):
+        assert _cheirar_formato(self.escrever(tmp_path, "x.dat", "DA:1,1\n")) == "lcov"
+
+    def test_cheirar_formato_recusa_o_que_nao_e_nenhum_dos_dois(self, tmp_path):
+        caminho = self.escrever(tmp_path, "x.dat", "isto é um texto qualquer")
+        with pytest.raises(FormatoDeCoberturaDesconhecido, match="não parece LCOV"):
+            _cheirar_formato(caminho)
+
+
+class TestLerDetectaOFormato:
+    """`ler` decide pelo conteúdo: nome de arquivo é convenção, conteúdo é fato."""
+
+    def test_ler_reconhece_lcov_com_extensao_inesperada(self, tmp_path):
+        alvo = tmp_path / "cobertura.dat"
+        alvo.write_text("SF:src/a.py\nDA:1,1\nend_of_record\n", encoding="utf-8")
+        assert set(ler(str(alvo))) == {"src/a.py"}
+
+    def test_ler_reconhece_xml_com_extensao_inesperada(self, tmp_path):
+        alvo = tmp_path / "cobertura.dat"
+        alvo.write_text(
+            '<coverage><class filename="src/a.py"><lines>'
+            '<line number="1" hits="1"/></lines></class></coverage>',
+            encoding="utf-8",
+        )
+        assert set(ler(str(alvo))) == {"src/a.py"}
+
+    def test_ler_recusa_arquivo_que_nao_e_relatorio(self, tmp_path):
+        alvo = tmp_path / "leia.txt"
+        alvo.write_text("um texto qualquer", encoding="utf-8")
+        with pytest.raises(FormatoDeCoberturaDesconhecido):
+            ler(str(alvo))
+
+    def test_ler_propaga_arquivo_inexistente(self, tmp_path):
+        with pytest.raises(FileNotFoundError):
+            ler(str(tmp_path / "nao_existe.info"))
+
+    def test_ler_repassa_a_raiz_para_a_normalizacao(self, tmp_path):
+        alvo = tmp_path / "cobertura.info"
+        alvo.write_text("SF:/proj/src/a.py\nDA:1,1\nend_of_record\n", encoding="utf-8")
+        assert set(ler(str(alvo), raiz="/proj")) == {"src/a.py"}
+
+
+class TestLerLcovAvisa:
+    def test_ler_lcov_le_um_relatorio_real(self, tmp_path):
+        alvo = tmp_path / "lcov.info"
+        alvo.write_text("SF:src/a.py\nDA:1,1\nend_of_record\n", encoding="utf-8")
+        assert set(ler_lcov(str(alvo))) == {"src/a.py"}
+
+    def test_ler_lcov_registra_quando_o_relatorio_esta_vazio(self, tmp_path, caplog):
+        """'Relatório vazio' e 'nenhum caminho casou' pedem correções opostas."""
+        alvo = tmp_path / "lcov.info"
+        alvo.write_text("", encoding="utf-8")
+        with caplog.at_level(logging.WARNING, logger="jev_crap.metrica.cobertura"):
+            assert ler_lcov(str(alvo)) == {}
+        assert "sem nenhum registro SF" in caplog.text
+
+    def test_ler_lcov_nao_avisa_quando_ha_registro(self, tmp_path, caplog):
+        alvo = tmp_path / "lcov.info"
+        alvo.write_text("SF:src/a.py\nDA:1,1\nend_of_record\n", encoding="utf-8")
+        with caplog.at_level(logging.WARNING, logger="jev_crap.metrica.cobertura"):
+            ler_lcov(str(alvo))
+        assert caplog.text == ""
+
+    def test_ler_lcov_aguenta_bom_de_ferramenta_windows(self, tmp_path):
+        alvo = tmp_path / "lcov.info"
+        alvo.write_bytes(b"\xef\xbb\xbfSF:src/a.py\nDA:1,1\nend_of_record\n")
+        assert set(ler_lcov(str(alvo))) == {"src/a.py"}
+
+    def test_ler_lcov_aguenta_byte_invalido(self, tmp_path):
+        alvo = tmp_path / "lcov.info"
+        alvo.write_bytes(b"SF:src/\xff.py\nDA:1,1\nend_of_record\n")
+        assert ler_lcov(str(alvo))
+
+    def test_ler_lcov_propaga_caminho_inexistente(self, tmp_path):
+        with pytest.raises(OSError):
+            ler_lcov(str(tmp_path / "nao_existe.info"))
