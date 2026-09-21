@@ -575,10 +575,10 @@ def _medir_uma(
     a varredura.
     """
     cruzamento.arquivos.add(bruta.arquivo)
-    cobertura_linha, cobertura_branch = _cobertura_da_funcao(
+    cobertura_linha, cobertura_branch, sem_dados_de_branch = _cobertura_da_funcao(
         bruta, relatorio, cruzamento.nao_casados, cruzamento.ambiguos
     )
-    if cobertura_branch == SEM_DADOS and cobertura_linha != SEM_DADOS:
+    if sem_dados_de_branch and cobertura_linha != SEM_DADOS:
         cruzamento.sem_branch += 1
 
     insumos, cobertura_linha, cobertura_branch = _insumos_da_funcao(
@@ -612,7 +612,7 @@ def _cobertura_da_funcao(
     relatorio: Mapping[str, CoberturaArquivo],
     nao_casados: set[str],
     ambiguos: set[str],
-) -> tuple[float, float]:
+) -> tuple[float, float, bool]:
     """A cobertura da faixa de linhas da função, e o registro do que não casou.
 
     Devolve :data:`SEM_DADOS` nos dois valores quando não há relatório ou quando
@@ -629,23 +629,31 @@ def _cobertura_da_funcao(
     acumulam por arquivo ao longo de toda a varredura, enquanto o retorno é por
     função. Misturar as duas cardinalidades no retorno faria o chamador
     reagregar o que já estava agregado.
+
+    O terceiro valor devolvido diz se a ausência de branch é do **relatório**, e
+    não da função. :func:`~jev_crap.metrica.cobertura.cobertura_de_faixa` devolve
+    a mesma sentinela para "o gerador não emitiu branch" e para "esta função não
+    tem desvio", e só quem tem o arquivo em mão separa as duas. Sem essa
+    separação, o aviso manda regerar com ``--cov-branch`` um relatório que já foi
+    gerado com ``--cov-branch`` — instrução inócua justamente para quem usou a
+    ferramenta do jeito certo.
     """
     if not relatorio:
-        return float(SEM_DADOS), float(SEM_DADOS)
+        return float(SEM_DADOS), float(SEM_DADOS), False
 
     cob, empate = _casar_arquivo(bruta.arquivo, relatorio)
     if empate:
         ambiguos.add(bruta.arquivo)
     if cob is None:
         nao_casados.add(bruta.arquivo)
-        return float(SEM_DADOS), float(SEM_DADOS)
+        return float(SEM_DADOS), float(SEM_DADOS), False
 
     cobertura_linha, cobertura_branch = mod_cobertura.cobertura_de_faixa(
         cob, bruta.linha_inicio, bruta.linha_fim
     )
     if not cob.tem_dados_de_branch:
-        cobertura_branch = float(SEM_DADOS)
-    return cobertura_linha, cobertura_branch
+        return cobertura_linha, float(SEM_DADOS), True
+    return cobertura_linha, cobertura_branch, False
 
 
 def _insumos_da_funcao(

@@ -1028,7 +1028,7 @@ class TestCoberturaDaFuncao:
     def test_cobertura_da_funcao_sem_relatorio_e_sem_dados(self):
         nao_casados, ambiguos = set(), set()
         assert _cobertura_da_funcao(medida(), {}, nao_casados, ambiguos) == (
-            float(SEM_DADOS), float(SEM_DADOS)
+            float(SEM_DADOS), float(SEM_DADOS), False
         )
 
     def test_cobertura_da_funcao_sem_relatorio_nao_registra_nao_casado(self):
@@ -1043,7 +1043,7 @@ class TestCoberturaDaFuncao:
         assert nao_casados == {"src/a.py"}
 
     def test_cobertura_da_funcao_le_a_faixa_quando_casa(self):
-        linha, _ = _cobertura_da_funcao(
+        linha, _, _ = _cobertura_da_funcao(
             medida(linha_inicio=1, linha_fim=2), {"a": cobertura("src/a.py")}, set(), set()
         )
         assert linha == 0.5
@@ -1055,10 +1055,31 @@ class TestCoberturaDaFuncao:
         assert ambiguos == {"src/a.py"}
 
     def test_cobertura_da_funcao_sem_branch_devolve_a_sentinela(self):
-        _, branch = _cobertura_da_funcao(
+        _, branch, sem_dados = _cobertura_da_funcao(
             medida(linha_inicio=1, linha_fim=2), {"a": cobertura("src/a.py")}, set(), set()
         )
-        assert branch == SEM_DADOS
+        assert (branch, sem_dados) == (SEM_DADOS, True)
+
+    def test_cobertura_da_funcao_separa_funcao_sem_ramo_de_relatorio_sem_branch(self):
+        """A sentinela é a mesma nos dois casos; o terceiro valor é o que separa.
+
+        Aqui o relatório trouxe branch (na linha 9); a função é que não tem
+        desvio dentro da sua faixa — e isso não é falta de dado nenhuma.
+        """
+        relatorio = {
+            "a": CoberturaArquivo(
+                arquivo="src/a.py",
+                linhas_cobertas={1},
+                linhas_totais={1, 2},
+                branches_cobertos=2,
+                branches_totais=2,
+                branches_por_linha={9: (2, 2)},
+            )
+        }
+        _, branch, sem_dados = _cobertura_da_funcao(
+            medida(linha_inicio=1, linha_fim=2), relatorio, set(), set()
+        )
+        assert (branch, sem_dados) == (SEM_DADOS, False)
 
 
 class TestInsumosDaFuncao:
@@ -1211,11 +1232,35 @@ class TestMedirUma:
         assert cruzamento.nao_casados == {"src/a.py"}
 
     def test_medir_uma_conta_quem_ficou_sem_branch(self):
+        """Arquivo que o gerador emitiu sem branch nenhum: aí o aviso procede."""
         cruzamento = _Cruzamento()
         _chamar_medir_uma(
             self.Bruta(), relatorio={"a": cobertura("src/a.py")}, cruzamento=cruzamento
         )
         assert cruzamento.sem_branch == 1
+
+    def test_medir_uma_nao_conta_funcao_sem_ramo_em_arquivo_com_branch(self):
+        """Função sem desvio não é falta de dado, e contá-la aqui produz um aviso
+        que manda regerar com `--cov-branch` um relatório que já tem branch.
+
+        O relatório abaixo traz branch para o arquivo, mas na linha 9 — fora da
+        faixa 1..2 da função. `cobertura_de_faixa` devolve a sentinela nos dois
+        casos, e é por isso que a distinção tem de vir de quem tem o arquivo em
+        mão, não do valor devolvido.
+        """
+        cruzamento = _Cruzamento()
+        relatorio = {
+            "a": CoberturaArquivo(
+                arquivo="src/a.py",
+                linhas_cobertas={1},
+                linhas_totais={1, 2},
+                branches_cobertos=2,
+                branches_totais=2,
+                branches_por_linha={9: (2, 2)},
+            )
+        }
+        _chamar_medir_uma(self.Bruta(), relatorio=relatorio, cruzamento=cruzamento)
+        assert cruzamento.sem_branch == 0
 
     def test_medir_uma_sem_com_codigo_nao_carrega_texto(self):
         """medir_risco não precisa do código: nada vai ao modelo."""
