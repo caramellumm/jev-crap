@@ -647,7 +647,20 @@ class TestConselho:
 
 class TestPrioridade:
     def test_prioridade_alta_quando_ha_gate_grave(self):
+        """Resultado, borda e erro de `_prioridade`, com valor esperado."""
+        # resultado: gate grave manda para o topo, custe o que custar
         assert _prioridade(medida(), RESPOSTAS_BOAS, 30.0, ["injecao 0.95"], []) == "alta"
+        assert _prioridade(medida(risco=5.0), RESPOSTAS_BOAS, 30.0, [], []) == "baixa"
+
+        # borda: exatamente no limiar já conta como acima dele
+        no_limiar = _prioridade(medida(risco=30.0), RESPOSTAS_BOAS, 30.0, [], [])
+        assert no_limiar in {"alta", "media", "média"}
+
+        # erro: sem resposta nenhuma continua devolvendo um rótulo, não None
+        assert _prioridade(medida(), {}, 30.0, [], []) in {
+            "alta", "media", "média", "baixa"
+        }
+        assert _prioridade(medida(risco=0.0), {}, 0.0, [], []) is not None
 
     def test_prioridade_baixa_com_risco_abaixo_do_limiar(self):
         assert _prioridade(medida(risco=5.0), RESPOSTAS_BOAS, 30.0, [], []) == "baixa"

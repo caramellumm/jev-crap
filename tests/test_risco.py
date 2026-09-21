@@ -84,9 +84,20 @@ class TestContratoDeCalcular:
     """
 
     def test_calcular_devolve_numero_na_formula_implementada(self):
-        assert isinstance(CrapClassico().calcular(insumos()), float)
+        """Resultado, borda e erro do método, na implementação e no protocolo."""
+        # resultado: os números publicados da fórmula clássica
         assert CrapClassico().calcular(insumos(complexidade=5, cobertura_linha=0.0)) == 30.0
         assert CrapClassico().calcular(insumos(complexidade=5, cobertura_linha=1.0)) == 5.0
+        assert CrapClassico().calcular(insumos(complexidade=10, cobertura_linha=0.5)) == 22.5
+
+        # borda: cobertura ausente vale como descoberta, o pior caso
+        sem_dado = CrapClassico().calcular(insumos(cobertura_linha=SEM_DADOS))
+        assert sem_dado == CrapClassico().calcular(insumos(cobertura_linha=0.0))
+        assert isinstance(CrapClassico().calcular(insumos()), float)
+
+        # erro: quem herda o protocolo sem implementar estoura em vez de dar None
+        with pytest.raises(NotImplementedError, match="SemCalcular"):
+            SemCalcular().calcular(insumos())
 
     def test_calcular_levanta_quando_a_formula_nao_implementa(self):
         assert isinstance(CrapClassico().calcular(insumos()), float)

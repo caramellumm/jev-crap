@@ -132,12 +132,27 @@ class TestContratoDeJulgar:
 
     ESTADO = {"codigo": "def f(): return 1", "linguagem": "python"}
 
-    def test_toda_implementacao_devolve_dicionario_e_o_protocolo_levanta(self, rubrica):
+    def test_toda_implementacao_devolve_dicionario_e_o_protocolo_levanta(
+        self, rubrica, caplog
+    ):
+        """Resultado, borda e erro do método, nas quatro implementações."""
+        # resultado: o transporte ativo traz respostas; o fake, o combinado
         ativo = JulgadorJev("sk-chave", cliente=cliente_que_responde(resposta_da_api()))
-        assert isinstance(ativo.julgar(self.ESTADO, rubrica), dict)
-        assert isinstance(JulgadorFake().julgar(self.ESTADO, rubrica), dict)
+        assert ativo.julgar(self.ESTADO, rubrica)["respostas"]
+        assert JulgadorFake().julgar(self.ESTADO, rubrica)["modelo"] == "jev-fake"
+
+        # borda: sem chave e com erro combinado, o retorno é {} e nunca None
         assert JulgadorDesligado().julgar(self.ESTADO, rubrica) == {}
         assert JulgadorFake(erro=True).julgar(self.ESTADO, rubrica) == {}
+        with caplog.at_level(logging.WARNING, logger="jev_crap.julgamento.jev"):
+            assert JulgadorDesligado().julgar({"sem_codigo": 1}, rubrica) == {}
+        assert "sem `codigo`" in caplog.text
+
+        # erro: rede caída degrada para {}; protocolo sem implementação estoura
+        caido = JulgadorJev(
+            "sk-chave", cliente=cliente_que_responde({}, status=500), dormir=lambda _s: None
+        )
+        assert caido.julgar(self.ESTADO, rubrica) == {}
         with pytest.raises(NotImplementedError, match="_Incompleto"):
             _Incompleto().julgar(self.ESTADO, rubrica)
 
