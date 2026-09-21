@@ -13,12 +13,14 @@ import httpx
 import pytest
 
 from jev_crap.julgamento.jev import (
+    CONFIANCA_MINIMA,
     ESPERA_MAXIMA_SEGUNDOS,
     STATUS_TRANSITORIOS,
     Julgador,
     JulgadorDesligado,
     JulgadorFake,
     JulgadorJev,
+    Resposta,
     _como_numero,
     _para_resposta,
     extrair_respostas,
@@ -606,3 +608,23 @@ class TestJulgadorDesligadoConfere:
         with caplog.at_level(logging.WARNING, logger="jev_crap.julgamento.jev"):
             JulgadorDesligado().julgar(self.ESTADO, rubrica)
         assert caplog.text == ""
+
+
+class TestDispersa:
+    """`dispersa` é o que impede um argmax sem convicção de virar veredito."""
+
+    def test_dispersa_e_falso_com_confianca_alta(self):
+        assert Resposta("score", 1.8, 0.9, 0.9).dispersa is False
+
+    def test_dispersa_e_verdadeiro_abaixo_do_piso(self):
+        assert Resposta("score", 1.0, 0.5, CONFIANCA_MINIMA - 0.01).dispersa is True
+
+    def test_dispersa_e_falso_exatamente_no_piso(self):
+        assert Resposta("score", 1.0, 0.5, CONFIANCA_MINIMA).dispersa is False
+
+    def test_dispersa_e_falso_para_noul(self):
+        """Num noul a dispersão já está dentro do próprio valor."""
+        assert Resposta("noul", 0.5, 0.5, None).dispersa is False
+
+    def test_dispersa_nunca_levanta_sem_confianca(self):
+        assert Resposta("score", 1.0, 0.5, None).dispersa is False

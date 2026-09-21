@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from jev_crap import diagnostico
 from jev_crap.cli import (
     _argumentos,
     _diretorio_atual,
@@ -36,6 +37,14 @@ def sem_chave_no_ambiente(monkeypatch, tmp_path):
 
 
 class TestDiagnosticoNaCli:
+    def test_a_cli_imprime_todo_campo_que_a_funcao_devolve(self, capsys):
+        """A CLI é uma vitrine da função: campo novo nela aparece sem mudar a CLI."""
+        principal(["--diagnostico"])
+        saida = capsys.readouterr().out
+        for campo, valor in diagnostico().items():
+            assert f"{campo}: " in saida
+            assert str(valor) in saida
+
     def test_diagnostico_sai_zero_sem_alvo(self, capsys):
         assert principal(["--diagnostico"]) == 0
         saida = capsys.readouterr().out
@@ -196,7 +205,7 @@ class TestSaidaCompletaDeUmaFuncaoJulgada:
 
         respostas = {
             **RESPOSTAS_BOAS,
-            "complexidade_cognitiva": score(0.4, confianca=0.2),  # nota baixa e dispersa
+            "complexidade_cognitiva": score(0.4, confianca=0.2),  # nota baixa, sem convicção
             "caso_limite_nao_tratado": noul(0.9),                 # dúvida
         }
         monkeypatch.setattr(cli, "obter_julgador", lambda: JulgadorFake(respostas))
