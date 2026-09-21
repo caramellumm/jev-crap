@@ -1,0 +1,53 @@
+# Bytecode e caches de ferramenta
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Ambientes virtuais e artefatos de build
+.venv/
+venv/
+env/
+dist/
+build/
+*.egg-info/
+.eggs/
+
+# Relatórios de cobertura.
+# Os arquivos abaixo são SAÍDA da suíte de testes e mudam a cada execução —
+# versioná-los polui o diff e não diz nada sobre o código. As exceções são os
+# fixtures de tests/, que são entrada fixa dos testes do leitor de cobertura e
+# precisam continuar versionados.
+.coverage
+.coverage.*
+coverage.xml
+coverage.json
+lcov.info
+*.lcov
+htmlcov/
+!tests/fixtures/coverage.xml
+!tests/fixtures/lcov.info
+
+# Histórico de episódios.
+# O aprendizado grava em <raiz>/.jev-crap/episodios.jsonl. É dado de uso local
+# de quem roda a ferramenta, não fonte do projeto: versionar isso misturaria a
+# experiência de uma máquina com o código que todo mundo compartilha.
+.jev-crap/
+*.jsonl
+!tests/fixtures/*.jsonl
+
+# Segredos.
+# A chave do Jev vem só de TYPESAFE_API_KEY no ambiente; se alguém guardar um
+# .env local para conveniência, ele não sobe junto.
+.env
+.env.*
+!.env.example
+
+# Sistema operacional e editores
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

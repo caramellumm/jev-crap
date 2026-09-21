@@ -1,0 +1,311 @@
+"""Testes do módulo de complexidade.
+
+As amostras em `tests/fixtures/` são arquivos reais de duas linguagens com
+complexidade calculada à mão (o cálculo está no comentário de cada função).
+Se o lizard mudar de contagem numa atualização, estes testes quebram — que é
+exatamente o aviso que queremos, porque a nota de risco do projeto inteiro é
+construída em cima desses números.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from jev_crap.metrica.complexidade import Funcao, analisar
+
+FIXTURES = Path(__file__).parent / "fixtures"
+AMOSTRA_PY = FIXTURES / "amostra.py"
+AMOSTRA_JS = FIXTURES / "amostra.js"
+
+
+def por_nome(funcoes: list[Funcao]) -> dict[str, Funcao]:
+    return {f.nome: f for f in funcoes}
+
+
+# --- a contagem em si -------------------------------------------------------
+
+
+def test_python_complexidade_por_funcao() -> None:
+    funcoes = por_nome(analisar([str(AMOSTRA_PY)]))
+
+    assert set(funcoes) == {"soma", "classifica", "total"}
+    assert funcoes["soma"].complexidade == 1
+    assert funcoes["classifica"].complexidade == 4
+    assert funcoes["total"].complexidade == 4
+
+
+def test_javascript_complexidade_por_funcao() -> None:
+    funcoes = por_nome(analisar([str(AMOSTRA_JS)]))
+
+    assert set(funcoes) == {"soma", "classifica", "total"}
+    assert funcoes["soma"].complexidade == 1
+    assert funcoes["classifica"].complexidade == 4
+    assert funcoes["total"].complexidade == 4
+
+
+def test_as_duas_linguagens_dao_o_mesmo_numero() -> None:
+    """A métrica precisa ser comparável entre linguagens para o relatório somar."""
+    python = {f.nome: f.complexidade for f in analisar([str(AMOSTRA_PY)])}
+    javascript = {f.nome: f.complexidade for f in analisar([str(AMOSTRA_JS)])}
+
+    assert python == javascript
+
+
+# --- os demais campos -------------------------------------------------------
+
+
+def test_campos_da_funcao_python() -> None:
+    soma = por_nome(analisar([str(AMOSTRA_PY)]))["soma"]
+
+    assert soma.arquivo.endswith("amostra.py")
+    assert soma.linguagem == "python"
+    assert soma.parametros == 2
+    assert soma.linha_inicio < soma.linha_fim
+    assert soma.linhas_logicas == 2  # def + return; docstring não é linha lógica
+
+
+def test_campos_da_funcao_javascript() -> None:
+    total = por_nome(analisar([str(AMOSTRA_JS)]))["total"]
+
+    assert total.arquivo.endswith("amostra.js")
+    assert total.linguagem == "javascript"
+    assert total.parametros == 1
+    assert total.linha_inicio < total.linha_fim
+
+
+def test_linhas_logicas_ignoram_documentacao(tmp_path: Path) -> None:
+    """Documentar uma função não pode fazer ela parecer maior do que é."""
+    (tmp_path / "com.py").write_text(
+        'def f(a, b):\n    """Explica.\n\n    Em várias linhas.\n    """\n    return a + b\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "sem.py").write_text("def f(a, b):\n    return a + b\n", encoding="utf-8")
+
+    com, sem = analisar([str(tmp_path / "com.py")]), analisar([str(tmp_path / "sem.py")])
+
+    assert com[0].linhas_logicas == sem[0].linhas_logicas == 2
+
+
+def test_linhas_da_funcao_apontam_para_o_corpo_certo() -> None:
+    """O cruzamento com cobertura usa essa faixa; se ela mentir, tudo depois mente."""
+    classifica = por_nome(analisar([str(AMOSTRA_PY)]))["classifica"]
+    linhas = AMOSTRA_PY.read_text(encoding="utf-8").splitlines()
+
+    assert linhas[classifica.linha_inicio - 1].startswith("def classifica(")
+    assert 'return "F"' in linhas[classifica.linha_fim - 1]
+
+
+# --- varredura de diretório -------------------------------------------------
+
+
+def test_diretorio_varre_recursivamente_as_duas_linguagens() -> None:
+    funcoes = analisar([str(FIXTURES)])
+
+    assert {f.linguagem for f in funcoes} == {"python", "javascript"}
+    assert len(funcoes) == 6
+
+
+def test_subdiretorio_e_alcancado(tmp_path: Path) -> None:
+    fundo = tmp_path / "a" / "b" / "c"
+    fundo.mkdir(parents=True)
+    (fundo / "fundo.py").write_text("def f(x):\n    return x\n", encoding="utf-8")
+
+    funcoes = analisar([str(tmp_path)])
+
+    assert [f.nome for f in funcoes] == ["f"]
+
+
+def test_varredura_e_deterministica(tmp_path: Path) -> None:
+    for nome in ("z.py", "a.py", "m.py"):
+        (tmp_path / nome).write_text("def f(x):\n    return x\n", encoding="utf-8")
+
+    primeira = [f.arquivo for f in analisar([str(tmp_path)])]
+    segunda = [f.arquivo for f in analisar([str(tmp_path)])]
+
+    assert primeira == segunda
+    assert primeira == sorted(primeira)
+
+
+def test_arquivo_repetido_nao_duplica(tmp_path: Path) -> None:
+    arquivo = tmp_path / "unico.py"
+    arquivo.write_text("def f(x):\n    return x\n", encoding="utf-8")
+
+    funcoes = analisar([str(tmp_path), str(arquivo)])
+
+    assert len(funcoes) == 1
+
+
+# --- exclusões --------------------------------------------------------------
+
+
+@pytest.mark.parametrize("lixo", ["node_modules", ".venv", "__pycache__", "dist", "build", ".git"])
+def test_ignora_diretorios_de_terceiros_por_padrao(tmp_path: Path, lixo: str) -> None:
+    (tmp_path / "meu.py").write_text("def meu(x):\n    return x\n", encoding="utf-8")
+    poluido = tmp_path / lixo
+    poluido.mkdir()
+    (poluido / "alheio.py").write_text("def alheio(x):\n    return x\n", encoding="utf-8")
+
+    funcoes = analisar([str(tmp_path)])
+
+    assert [f.nome for f in funcoes] == ["meu"]
+
+
+def test_exclusao_adicional_por_nome_de_pasta(tmp_path: Path) -> None:
+    (tmp_path / "meu.py").write_text("def meu(x):\n    return x\n", encoding="utf-8")
+    gerado = tmp_path / "gerado"
+    gerado.mkdir()
+    (gerado / "proto.py").write_text("def proto(x):\n    return x\n", encoding="utf-8")
+
+    funcoes = analisar([str(tmp_path)], excluir=["gerado"])
+
+    assert [f.nome for f in funcoes] == ["meu"]
+
+
+def test_exclusao_adicional_por_glob_de_arquivo(tmp_path: Path) -> None:
+    (tmp_path / "app.js").write_text("function app(x) { return x; }\n", encoding="utf-8")
+    (tmp_path / "app.min.js").write_text("function apx(x) { return x; }\n", encoding="utf-8")
+
+    funcoes = analisar([str(tmp_path)], excluir=["*.min.js"])
+
+    assert [f.nome for f in funcoes] == ["app"]
+
+
+def test_exclusao_com_barra_casa_subcaminho(tmp_path: Path) -> None:
+    antigo = tmp_path / "src" / "legado"
+    antigo.mkdir(parents=True)
+    (antigo / "velho.py").write_text("def velho(x):\n    return x\n", encoding="utf-8")
+    novo = tmp_path / "src" / "novo.py"
+    novo.write_text("def novo(x):\n    return x\n", encoding="utf-8")
+
+    funcoes = analisar([str(tmp_path)], excluir=["src/legado"])
+
+    assert [f.nome for f in funcoes] == ["novo"]
+
+
+def test_pasta_acima_da_raiz_analisada_nao_exclui_nada(tmp_path: Path) -> None:
+    """Regressão: o projeto pode morar dentro de uma pasta chamada `build`.
+
+    As exclusões valem do ponto analisado para baixo. Se elas olhassem o caminho
+    absoluto inteiro, quem guarda o checkout em `~/build/projeto` receberia um
+    relatório vazio sem nenhum aviso — o pior tipo de falha para esta ferramenta.
+    """
+    dentro = tmp_path / "build" / "meuprojeto" / "src"
+    dentro.mkdir(parents=True)
+    (dentro / "app.py").write_text("def app(x):\n    return x\n", encoding="utf-8")
+
+    funcoes = analisar([str(tmp_path / "build" / "meuprojeto")])
+
+    assert [f.nome for f in funcoes] == ["app"]
+
+
+def test_raiz_analisada_com_nome_excluido_ainda_e_varrida(tmp_path: Path) -> None:
+    """Apontar para `dist/` é pedido explícito, igual a apontar para um arquivo."""
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / "empacotado.js").write_text("function emp(x) { return x; }\n", encoding="utf-8")
+
+    funcoes = analisar([str(dist)])
+
+    assert [f.nome for f in funcoes] == ["emp"]
+
+
+def test_arquivo_apontado_explicitamente_vence_a_exclusao(tmp_path: Path) -> None:
+    """Quem aponta o dedo para um arquivo quer aquele arquivo (regra do ripgrep)."""
+    pasta = tmp_path / "node_modules"
+    pasta.mkdir()
+    alvo = pasta / "alheio.js"
+    alvo.write_text("function alheio(x) { return x; }\n", encoding="utf-8")
+
+    funcoes = analisar([str(alvo)])
+
+    assert [f.nome for f in funcoes] == ["alheio"]
+
+
+# --- linguagens fora do alcance do lizard -----------------------------------
+
+
+def test_extensao_sem_suporte_e_pulada_em_silencio(tmp_path: Path) -> None:
+    (tmp_path / "LEIAME.md").write_text("# nada de código aqui\n", encoding="utf-8")
+    (tmp_path / "dados.json").write_text('{"a": 1}\n', encoding="utf-8")
+    (tmp_path / "notas.txt").write_text("texto solto\n", encoding="utf-8")
+    (tmp_path / "bom.py").write_text("def bom(x):\n    return x\n", encoding="utf-8")
+
+    funcoes = analisar([str(tmp_path)])
+
+    assert [f.nome for f in funcoes] == ["bom"]
+
+
+def test_arquivo_ilegivel_nao_derruba_a_varredura(tmp_path: Path) -> None:
+    """Um arquivo torto não pode zerar o relatório do repositório inteiro."""
+    (tmp_path / "quebrado.py").write_bytes(b"\x00\x01\x02 n\xe3o \xff decodifica")
+    (tmp_path / "bom.py").write_text("def bom(x):\n    return x\n", encoding="utf-8")
+
+    funcoes = analisar([str(tmp_path)])
+
+    assert [f.nome for f in funcoes] == ["bom"]
+
+
+def test_caminho_inexistente_levanta_erro(tmp_path: Path) -> None:
+    """Erro de digitação do usuário não pode virar 'nenhuma função encontrada'."""
+    with pytest.raises(FileNotFoundError):
+        analisar([str(tmp_path / "nao-existe")])
+
+
+# --- nome e chave -----------------------------------------------------------
+
+
+def test_nome_qualificado_vira_ponto(tmp_path: Path) -> None:
+    """Java/C++ vêm com `Classe::metodo`; o relatório usa ponto em toda linguagem."""
+    (tmp_path / "Caixa.java").write_text(
+        "public class Caixa {\n"
+        "    public int soma(int a, int b) {\n"
+        "        if (a > b) { return a; }\n"
+        "        return b;\n"
+        "    }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+
+    funcoes = analisar([str(tmp_path)])
+
+    assert [f.nome for f in funcoes] == ["Caixa.soma"]
+    assert funcoes[0].linguagem == "java"
+
+
+def test_chave_separa_funcoes_de_mesmo_nome(tmp_path: Path) -> None:
+    """Nome não é chave: anônimas e homônimas existem. Arquivo + linha é."""
+    (tmp_path / "duplo.js").write_text(
+        "const a = [1].map((x) => x + 1);\nconst b = [2].map((x) => x + 2);\n",
+        encoding="utf-8",
+    )
+
+    funcoes = analisar([str(tmp_path)])
+
+    assert len({f.nome for f in funcoes}) < len(funcoes)
+    assert len({f.chave for f in funcoes}) == len(funcoes)
+
+
+def test_chave_repete_entre_execucoes() -> None:
+    """A chave precisa sobreviver entre rodadas para cruzar com a cobertura."""
+    primeira = sorted(f.chave for f in analisar([str(AMOSTRA_PY)]))
+    segunda = sorted(f.chave for f in analisar([str(AMOSTRA_PY)]))
+
+    assert primeira == segunda
+    assert all(chave.startswith(str(AMOSTRA_PY)) for chave in primeira)
+
+
+# --- contrato do dataclass --------------------------------------------------
+
+
+def test_funcao_e_imutavel_e_hashavel() -> None:
+    funcao = analisar([str(AMOSTRA_PY)])[0]
+
+    with pytest.raises(Exception):  # noqa: B017 - frozen levanta FrozenInstanceError
+        funcao.complexidade = 99  # type: ignore[misc]
+    assert len({funcao, funcao}) == 1
+
+
+def test_lista_vazia_de_caminhos_nao_reclama() -> None:
+    assert analisar([]) == []

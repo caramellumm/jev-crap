@@ -1,0 +1,259 @@
+{
+  "versao": "2.0",
+  "niveis_do_score": 3,
+  "dimensoes": {
+    "complexidade_cognitiva": {
+      "grupo": "qualidade",
+      "peso": 0.30,
+      "sentido": "maior_melhor",
+      "pergunta": {
+        "type": "score",
+        "instructions": "Quanto esforço mental alguém gasta para seguir o fluxo de `codigo`? Julgue aninhamento e quanto estado o leitor precisa carregar na cabeça, não o tamanho. Leitor suposto: pessoa competente na linguagem, sem conhecimento prévio deste arquivo, tentando alterar o código com segurança.",
+        "criteria": [
+          {
+            "what": "Exige rastrear vários níveis de aninhamento e guardar estado mental",
+            "examples": [
+              "condicionais dentro de laços dentro de condicionais, com variáveis acumuladas em cada nível",
+              "a mesma variável muda de sentido ao longo do escopo",
+              "entender o retorno obriga a simular o código linha a linha"
+            ]
+          },
+          {
+            "what": "Segue-se com atenção; um ou dois trechos exigem reler",
+            "examples": [
+              "o caminho principal se lê de cima para baixo, mas um bloco de tratamento pede uma segunda passada",
+              "um nome ou outro obriga a olhar onde a variável foi criada",
+              "há uma expressão densa cujo resultado precisa ser deduzido"
+            ]
+          },
+          {
+            "what": "Fluxo linear; o leitor nunca precisa voltar",
+            "examples": [
+              "saídas antecipadas no topo e um caminho único depois delas",
+              "cada nome diz o que a coisa é, e nada muda de sentido no meio",
+              "cabe de uma vez na cabeça"
+            ]
+          }
+        ]
+      }
+    },
+    "teste_verifica": {
+      "grupo": "qualidade",
+      "peso": 0.25,
+      "sentido": "maior_melhor",
+      "exige": "testes",
+      "pergunta": {
+        "type": "score",
+        "instructions": "Os testes em `testes` verificam o comportamento de `codigo`, com valor esperado explícito, ou apenas executam a função sem afirmar nada sobre o resultado? Esta é a pergunta que a cobertura não responde: cobertura prova que a linha rodou, não que alguém conferiu o resultado. Julgue o que as asserções realmente fixam, não a quantidade de testes.",
+        "criteria": [
+          {
+            "what": "Não há teste, ou o que existe chama a função sem verificar resultado",
+            "examples": [
+              "chama a função e não faz asserção nenhuma sobre retorno, estado ou efeito",
+              "as asserções olham só o formato: não é nulo, é lista, tem tamanho maior que zero",
+              "o valor esperado é recalculado pela própria implementação sob teste, então a asserção é verdadeira por construção",
+              "dublês substituem tanta coisa que o código sob teste quase não roda"
+            ]
+          },
+          {
+            "what": "Verifica o caminho principal; borda e erro ficam de fora",
+            "examples": [
+              "asserções fixam valores concretos esperados, porém só para entradas válidas e bem comportadas",
+              "nenhum teste para entrada vazia, limite, duplicada, fora de ordem ou malformada",
+              "os erros que o código levanta ou trata nunca são exercidos"
+            ]
+          },
+          {
+            "what": "Verifica resultado, borda e caminho de erro com valor esperado",
+            "examples": [
+              "há casos de borda com valor esperado explícito (vazio, limite, repetido, ordem inesperada)",
+              "o caminho de erro é exercido e o teste confere tipo, mensagem ou efeito da falha",
+              "efeitos fora do retorno são verificados: o que foi gravado, chamado, publicado ou não foi",
+              "se alguém mudasse a regra sem quebrar a sintaxe, algum teste ficaria vermelho"
+            ]
+          }
+        ]
+      }
+    },
+    "manutenibilidade": {
+      "grupo": "qualidade",
+      "peso": 0.25,
+      "sentido": "maior_melhor",
+      "pergunta": {
+        "type": "score",
+        "instructions": "Quão seguro é mudar `codigo` sem quebrar outra coisa? A cobertura em `cobertura_branch`, quando presente, faz parte do julgamento: ramo sem teste é mudança sem rede.",
+        "criteria": [
+          {
+            "what": "Mudar exige entender o corpo inteiro e nada avisa se quebrar",
+            "examples": [
+              "assuntos diferentes compartilham as mesmas variáveis, então mexer num afeta o outro",
+              "estado global ou efeito colateral escondido no meio do cálculo",
+              "nenhum ramo tem teste que falharia se o comportamento mudasse"
+            ]
+          },
+          {
+            "what": "Mudanças localizadas são possíveis com cuidado",
+            "examples": [
+              "dá para alterar um trecho sem reler tudo, desde que se confira o que ele usa",
+              "parte dos caminhos tem teste e parte não",
+              "as dependências estão visíveis na assinatura, mas há acoplamento implícito"
+            ]
+          },
+          {
+            "what": "Cada parte muda de forma independente e com rede de teste",
+            "examples": [
+              "as responsabilidades estão separadas e cada uma tem verificação própria",
+              "os ramos relevantes estão exercitados",
+              "quebrar o comportamento faz algum teste ficar vermelho na hora"
+            ]
+          }
+        ]
+      }
+    },
+    "tratamento_de_erros": {
+      "grupo": "qualidade",
+      "peso": 0.20,
+      "sentido": "maior_melhor",
+      "pergunta": {
+        "type": "score",
+        "instructions": "`codigo` trata entrada inválida, dado ausente e falha de colaborador de forma explícita, ou assume o caminho feliz?",
+        "criteria": [
+          {
+            "what": "Assume caminho feliz; entrada inesperada quebra ou passa calada",
+            "examples": [
+              "acessa campo, índice ou chave sem verificar se existe",
+              "captura exceção e segue adiante sem registrar nem tratar",
+              "converte tipo sem prever que a conversão pode falhar"
+            ]
+          },
+          {
+            "what": "Trata alguns casos e deixa outros descobertos",
+            "examples": [
+              "verifica o nulo mais óbvio e ignora o vazio, o grande demais ou o malformado",
+              "trata a falha de um colaborador e não a dos outros",
+              "a mensagem de erro existe mas não diz o que fazer a respeito"
+            ]
+          },
+          {
+            "what": "Os casos de falha são explícitos e tratados",
+            "examples": [
+              "cada entrada inválida previsível tem caminho próprio e nomeado",
+              "falha de colaborador vira erro com contexto, não exceção crua",
+              "a ausência de dado é representada como ausência, não como zero ou string vazia"
+            ]
+          }
+        ]
+      }
+    },
+
+    "consequencia_de_falha": {
+      "grupo": "contexto",
+      "sentido": "maior_mais_em_jogo",
+      "pergunta": {
+        "type": "score",
+        "instructions": "Se `codigo` falhar em produção, qual o tamanho do estrago? Julgue pelo que ele faz, não por quão provável é a falha. Suponha a falha plausível — resultado errado ou exceção —, não o pior cenário imaginável.",
+        "criteria": [
+          {
+            "what": "Efeito cosmético ou isolado; o erro aparece na hora e se conserta refazendo",
+            "examples": [
+              "formatação, uma mensagem na tela, um log",
+              "quem usa percebe e repete a operação sem perder nada",
+              "não toca dado persistente, dinheiro, permissão nem sistema de terceiro"
+            ]
+          },
+          {
+            "what": "Degrada uma funcionalidade; há contorno",
+            "examples": [
+              "trava um fluxo até alguém corrigir, mas é reversível reprocessando da origem",
+              "atinge um subconjunto de usuários ou um job que tem retentativa",
+              "gera retrabalho e suporte, sem perda definitiva de dado"
+            ]
+          },
+          {
+            "what": "Corrompe dado, expõe informação ou derruba o sistema",
+            "examples": [
+              "apaga ou corrompe dado sem cópia de recuperação",
+              "move dinheiro, concede ou nega acesso indevidamente, expõe segredo ou dado pessoal",
+              "derruba o caminho crítico de todos os usuários ao mesmo tempo",
+              "falha silenciosa: o resultado errado é aceito como certo por quem consome depois"
+            ]
+          }
+        ]
+      }
+    },
+    "complexidade_essencial": {
+      "grupo": "contexto",
+      "sentido": "maior_mais_essencial",
+      "pergunta": {
+        "type": "noul",
+        "instructions": "Os caminhos de `codigo` vêm das regras do domínio, de modo que simplificar apagaria casos reais — em vez de virem do jeito como o código foi escrito?",
+        "criteria": {
+          "true": "Cada ramo trata um caso distinto e nomeável que vem de fora do código: uma regra de negócio, um formato de entrada, um estado do protocolo, uma versão a suportar. Remover qualquer um perderia comportamento exigido, não apenas texto.",
+          "false": "Os ramos vêm da escrita: a mesma decisão é repetida em pontos diferentes, o aninhamento caberia numa tabela de dados ou em saídas antecipadas, parâmetros booleanos ligam e desligam trechos, ou há generalidade especulativa que o domínio descrito não exige."
+        }
+      }
+    },
+
+    "exec_dinamica": {
+      "grupo": "risco_grave",
+      "sentido": "maior_pior",
+      "pergunta": {
+        "type": "noul",
+        "instructions": "`codigo` executa ou interpreta dinamicamente conteúdo que veio de fora — eval, new Function, exec, desserialização não confiável, ou montagem de comando de shell?",
+        "criteria": {
+          "true": "Há uma construção que transforma dado em código ou em comando executado: eval, exec, new Function, compile seguido de execução, pickle/YAML inseguro sobre entrada externa, ou execução de shell com string montada. O conteúdo executado pode ser influenciado por quem fornece a entrada.",
+          "false": "Não há execução dinâmica de conteúdo externo. Chamar funções conhecidas, despachar por dicionário de handlers fixos, usar getattr sobre um conjunto fechado de nomes definidos no próprio código, ou desserializar JSON não contam — nada disso transforma dado em código novo."
+        }
+      }
+    },
+    "injecao": {
+      "grupo": "risco_grave",
+      "sentido": "maior_pior",
+      "pergunta": {
+        "type": "noul",
+        "instructions": "`codigo` monta uma consulta, comando, caminho de arquivo ou URL concatenando valor que veio da entrada, sem parametrizar nem escapar?",
+        "criteria": {
+          "true": "Uma string destinada a um interpretador (SQL, shell, caminho do sistema de arquivos, URL, HTML, LDAP) é construída por concatenação ou interpolação com um valor de entrada, sem parametrização, escape ou validação contra um conjunto fechado.",
+          "false": "Ou não há construção desse tipo, ou ela é feita com segurança: consulta parametrizada, argumentos passados como lista para o subprocesso, caminho resolvido e verificado contra uma raiz, valor escolhido de um conjunto fechado definido no código. Interpolar em mensagem de log ou de erro não é injeção."
+        }
+      }
+    },
+
+    "entrada_nao_validada": {
+      "grupo": "risco_atencao",
+      "sentido": "maior_pior",
+      "pergunta": {
+        "type": "noul",
+        "instructions": "Os valores que chegam de fora em `codigo` são usados sem checar tipo, formato ou presença?",
+        "criteria": {
+          "true": "Um valor recebido como parâmetro, lido de arquivo, rede ou ambiente é usado diretamente — indexado, convertido, acessado por atributo, passado adiante — sem nenhuma verificação de que é o que se espera.",
+          "false": "A entrada é verificada antes do uso, ou chega já validada por quem chama de forma visível no código, ou é de um tipo que o próprio sistema de tipos garante."
+        }
+      }
+    },
+    "retorno_inconsistente": {
+      "grupo": "risco_atencao",
+      "sentido": "maior_pior",
+      "pergunta": {
+        "type": "noul",
+        "instructions": "O valor devolvido por `codigo` muda de tipo ou de forma conforme o caminho, de um jeito que quem chama não consegue prever?",
+        "criteria": {
+          "true": "Caminhos diferentes devolvem tipos ou formatos diferentes sem que a assinatura ou o nome avisem: ora uma lista ora um único item, ora o valor ora nulo, ora o resultado ora um código de erro, ora dicionário com uma chave ora com outra.",
+          "false": "Todos os caminhos devolvem a mesma forma, ou a variação está declarada e é previsível: um tipo opcional anunciado, uma união declarada, ou um retorno único sempre da mesma estrutura."
+        }
+      }
+    },
+    "caso_limite_nao_tratado": {
+      "grupo": "risco_atencao",
+      "sentido": "maior_pior",
+      "pergunta": {
+        "type": "noul",
+        "instructions": "Existe entrada plausível — vazia, nula, grande demais, duplicada, fora de ordem — que faria `codigo` quebrar ou dar resultado errado em silêncio?",
+        "criteria": {
+          "true": "Dá para nomear uma entrada que o domínio permite e que produziria exceção ou resultado errado: divisão por tamanho zero, índice em coleção vazia, acesso a chave ausente, estouro de limite, ordem inesperada aceita sem verificação.",
+          "false": "As entradas plausíveis estão cobertas: os casos vazios e de limite têm caminho próprio, ou o tipo da entrada impede que eles ocorram."
+        }
+      }
+    }
+  }
+}

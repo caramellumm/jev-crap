@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "jev-crap": {
+      "command": "uv",
+      "args": ["run", "--directory", ".", "jev-crap-mcp"],
+      "env": {}
+    }
+  }
+}
