@@ -6,9 +6,21 @@ quebrada — um pipeline que sai 0 por engano passa meses "avaliando".
 
 from __future__ import annotations
 
+import argparse
+from pathlib import Path
+
 import pytest
 
-from jev_crap.cli import principal
+from jev_crap.cli import (
+    _argumentos,
+    _diretorio_atual,
+    _imprimir,
+    _limiar,
+    _linhas_da_funcao,
+    _pct,
+    _sem_chave,
+    principal,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -179,3 +191,172 @@ class TestSaidaCompletaDeUmaFuncaoJulgada:
         saida = capsys.readouterr().out
         assert "custo:" in saida
         assert "1800 tokens de entrada" in saida  # duas funções × 900
+
+
+class TestPct:
+    """`_pct` é a última coisa entre um sentinela e a tela de quem lê."""
+
+    def test_pct_formata_fracao_como_porcentagem(self):
+        assert _pct(0.2) == "20%"
+
+    def test_pct_arredonda_para_inteiro(self):
+        assert _pct(0.156) == "16%"
+
+    def test_pct_devolve_nd_para_none(self):
+        assert _pct(None) == "n/d"
+
+    def test_pct_devolve_nd_para_a_sentinela_sem_dados(self):
+        assert _pct(-1.0) == "n/d"
+
+    def test_pct_devolve_nd_para_nan(self):
+        assert _pct(float("nan")) == "n/d"
+
+    def test_pct_devolve_nd_para_texto(self):
+        assert _pct("80%") == "n/d"
+
+    def test_pct_devolve_nd_para_booleano(self):
+        assert _pct(True) == "n/d"
+
+    def test_pct_nao_esconde_valor_acima_de_cem_por_cento(self):
+        assert _pct(1.4) == "140%"
+
+    def test_pct_aceita_zero(self):
+        assert _pct(0.0) == "0%"
+
+
+class TestLinhasDaFuncao:
+    def test_linhas_da_funcao_desempacota_o_par(self):
+        assert _linhas_da_funcao({"linhas": [3, 9]}) == (3, 9)
+
+    def test_linhas_da_funcao_aceita_tupla(self):
+        assert _linhas_da_funcao({"linhas": (1, 2)}) == (1, 2)
+
+    def test_linhas_da_funcao_marca_ausencia(self):
+        assert _linhas_da_funcao({}) == ("?", "?")
+
+    def test_linhas_da_funcao_marca_tamanho_errado(self):
+        assert _linhas_da_funcao({"linhas": [1, 2, 3]}) == ("?", "?")
+
+    def test_linhas_da_funcao_marca_tipo_errado(self):
+        assert _linhas_da_funcao({"linhas": "3-9"}) == ("?", "?")
+
+
+class TestImprimirTolerante:
+    """Uma chave faltando não pode levar junto o relatório inteiro."""
+
+    def test_imprimir_nao_levanta_com_dicionario_vazio(self, capsys):
+        _imprimir({})
+        assert capsys.readouterr().out
+
+    def test_imprimir_marca_campos_ausentes(self, capsys):
+        _imprimir({})
+        assert "?" in capsys.readouterr().out
+
+    def test_imprimir_usa_sem_julgamento_como_veredito_padrao(self, capsys):
+        _imprimir({})
+        assert "SEM_JULGAMENTO" in capsys.readouterr().out
+
+    def test_imprimir_omite_conselho_quando_nao_houve_julgamento(self, capsys):
+        _imprimir({"veredito": "sem_julgamento", "conselho": "não deveria aparecer"})
+        assert "não deveria aparecer" not in capsys.readouterr().out
+
+    def test_imprimir_mostra_barrado_por_quando_ha_grave(self, capsys):
+        _imprimir({"graves": ["injecao"]})
+        assert "barrado por: injecao" in capsys.readouterr().out
+
+    def test_imprimir_mostra_sem_nota_quando_nao_ha_nota(self, capsys):
+        _imprimir({"nota": None})
+        assert "sem nota" in capsys.readouterr().out
+
+    def test_imprimir_nao_levanta_com_nota_sentinela(self, capsys):
+        _imprimir({"notas": {"teste_verifica": -1.0}})
+        assert "teste n/d" in capsys.readouterr().out
+
+
+class TestSemChave:
+    def test_sem_chave_diz_qual_env_foi_lido(self, tmp_path):
+        assert "nao define a variável" in _sem_chave(tmp_path / ".env").replace("ã", "a")
+
+    def test_sem_chave_diz_quando_nao_houve_env(self):
+        assert "nenhum .env" in _sem_chave(None)
+
+    def test_sem_chave_sempre_oferece_a_saida_sem_julgamento(self):
+        assert "--sem-julgamento" in _sem_chave(None)
+
+    def test_sem_chave_nomeia_a_variavel(self):
+        assert "TYPESAFE_API_KEY" in _sem_chave(None)
+
+    def test_sem_chave_nao_levanta_sem_diretorio_de_trabalho(self, monkeypatch):
+        def explode():
+            raise FileNotFoundError("workspace apagado")
+
+        monkeypatch.setattr(Path, "cwd", explode)
+        assert "indisponível" in _sem_chave(None)
+
+
+class TestDiretorioAtual:
+    def test_diretorio_atual_devolve_o_cwd(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        assert _diretorio_atual() == str(Path.cwd())
+
+    def test_diretorio_atual_marca_quando_o_cwd_sumiu(self, monkeypatch):
+        def explode():
+            raise OSError("sumiu")
+
+        monkeypatch.setattr(Path, "cwd", explode)
+        assert "indisponível" in _diretorio_atual()
+
+
+class TestLimiar:
+    def test_limiar_aceita_numero_positivo(self):
+        assert _limiar("12.5") == 12.5
+
+    def test_limiar_aceita_zero(self):
+        assert _limiar("0") == 0.0
+
+    def test_limiar_recusa_negativo(self):
+        with pytest.raises(argparse.ArgumentTypeError, match="não pode ser negativo"):
+            _limiar("-1")
+
+    def test_limiar_recusa_nan(self):
+        with pytest.raises(argparse.ArgumentTypeError, match="nan"):
+            _limiar("nan")
+
+    def test_limiar_recusa_texto(self):
+        with pytest.raises(argparse.ArgumentTypeError, match="precisa ser um número"):
+            _limiar("alto")
+
+
+class TestArgumentos:
+    def test_argumentos_recolhe_varios_alvos(self):
+        assert _argumentos(["src", "lib"]).alvos == ["src", "lib"]
+
+    def test_argumentos_aceita_nenhum_alvo_para_diagnostico(self):
+        assert _argumentos(["--diagnostico"]).alvos == []
+
+    def test_argumentos_guarda_o_limiar_conferido(self):
+        assert _argumentos(["src", "--limiar", "30"]).limiar == 30.0
+
+    def test_argumentos_recusa_limiar_negativo_saindo_dois(self):
+        with pytest.raises(SystemExit) as saida:
+            _argumentos(["src", "--limiar", "-3"])
+        assert saida.value.code == 2
+
+    def test_argumentos_tem_sem_julgamento_desligado_por_padrao(self):
+        assert _argumentos(["src"]).sem_julgamento is False
+
+    def test_argumentos_liga_sem_julgamento_com_a_flag(self):
+        assert _argumentos(["src", "--sem-julgamento"]).sem_julgamento is True
+
+
+class TestDiagnosticoNaCli:
+    def test_diagnostico_sai_zero_sem_alvo(self, capsys):
+        assert principal(["--diagnostico"]) == 0
+        assert "jev_crap:" in capsys.readouterr().out
+
+    def test_diagnostico_nao_exige_chave(self, capsys):
+        assert principal(["--diagnostico"]) == 0
+
+    def test_sem_alvo_e_sem_diagnostico_sai_erro_de_uso(self, capsys):
+        assert principal([]) == 3
+        assert "ALVO" in capsys.readouterr().err

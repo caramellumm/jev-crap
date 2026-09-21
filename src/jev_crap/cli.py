@@ -38,7 +38,40 @@ SAIDA_POR_VEREDITO = {"aprovar": 0, "revisar": 1, "bloquear": 2, "sem_julgamento
 ERRO_DE_USO = 3
 
 
+def _limiar(bruto: str) -> float:
+    """Converte e confere o ``--limiar``, para o argparse recusar no lugar certo.
+
+    Um ``type=float`` cru aceita ``-5`` e ``nan``. O primeiro julgaria tudo (e
+    quem digitou queria o contrário); o segundo faz toda comparação
+    ``risco >= limiar`` dar falso, e a varredura sai "0 acima do limiar" —
+    saída plausível, cara e errada, sem nenhuma mensagem de erro.
+
+    Levantar ``ArgumentTypeError`` aqui faz o argparse imprimir o uso e sair 2,
+    com o valor ofensor na mensagem. Conferir depois, dentro de ``principal``,
+    daria a mesma recusa sem dizer qual argumento estava errado.
+    """
+    try:
+        valor = float(bruto)
+    except (TypeError, ValueError) as erro:
+        raise argparse.ArgumentTypeError(
+            f"--limiar precisa ser um número; veio {bruto!r}"
+        ) from erro
+    if valor != valor:
+        raise argparse.ArgumentTypeError(
+            "--limiar não pode ser nan: nenhuma função ficaria acima dele"
+        )
+    if valor < 0:
+        raise argparse.ArgumentTypeError(f"--limiar não pode ser negativo; veio {valor}")
+    return valor
+
+
 def _argumentos(argv: list[str]) -> argparse.Namespace:
+    """A linha de comando, já conferida.
+
+    A validação do limiar mora no ``type=`` e não depois: o argparse é quem
+    sabe imprimir o uso e apontar o argumento culpado, e reimplementar isso
+    dentro de ``principal`` daria a mesma recusa com metade da informação.
+    """
     p = argparse.ArgumentParser(
         prog="jev-crap",
         description=(
@@ -54,7 +87,7 @@ def _argumentos(argv: list[str]) -> argparse.Namespace:
     p.add_argument("alvos", nargs="*", metavar="ALVO", help="arquivos ou pastas a avaliar")
     p.add_argument("--cobertura", metavar="REL", help="relatório LCOV (.info) ou Cobertura XML")
     p.add_argument("--testes", metavar="DIR", help="pasta onde estão os testes")
-    p.add_argument("--limiar", type=float, metavar="N",
+    p.add_argument("--limiar", type=_limiar, metavar="N",
                    help="risco a partir do qual a função é julgada (0 julga todas)")
     p.add_argument("--sem-julgamento", action="store_true", dest="sem_julgamento",
                    help="só o eixo contável: sem rede, sem custo")
@@ -67,46 +100,116 @@ def _argumentos(argv: list[str]) -> argparse.Namespace:
 
 
 def _pct(valor: float | None) -> str:
-    return "n/d" if valor is None else f"{valor:.0%}"
+    """Uma fração 0..1 como porcentagem, ou ``n/d`` quando não é uma.
+
+    Três entradas viram ``n/d`` em vez de virarem número, e cada uma existe
+    porque já apareceu na saída de alguém:
+
+    - **``None``**, que é como o relatório representa "o arquivo não estava no
+      relatório de cobertura";
+    - **negativo**, que é a sentinela ``SEM_DADOS`` (-1) escapando de uma
+      camada que devia tê-la traduzido. Sem esta guarda ela vira ``-100%``, que
+      parece um número e faz quem lê procurar o defeito na medição;
+    - **``nan``**, que sai de uma divisão 0/0 num arquivo sem linha executável.
+      Formatado direto, imprime ``nan%``.
+
+    Acima de 1 não é erro: cobertura de faixa pode passar de 100% quando o
+    relatório conta linhas que o recorte da função não inclui, e esconder isso
+    apagaria justamente o sinal de que os dois lados estão desalinhados.
+    """
+    if valor is None or not isinstance(valor, (int, float)) or isinstance(valor, bool):
+        return "n/d"
+    if valor != valor or valor < 0:  # NaN nunca é igual a si mesmo
+        return "n/d"
+    return f"{valor:.0%}"
+
+
+def _linhas_da_funcao(f: dict[str, Any]) -> tuple[Any, Any]:
+    """O par (início, fim) do campo ``linhas``, tolerando o que não é par.
+
+    O relatório chega como dicionário — do próprio módulo de avaliação ou de um
+    JSON gravado numa versão anterior e relido. Desempacotar direto num par
+    levanta ``ValueError`` para lista de tamanho diferente, e isso aconteceria
+    no meio da impressão, com metade do relatório já na tela.
+    """
+    linhas = f.get("linhas")
+    if isinstance(linhas, (list, tuple)) and len(linhas) == 2:
+        return linhas[0], linhas[1]
+    return "?", "?"
 
 
 def _imprimir(f: dict[str, Any]) -> None:
-    inicio, fim = f["linhas"]
-    print(f"\n{f['arquivo']}:{inicio}  {f['funcao']}  ({f['tamanho']} linhas)")
+    """Um bloco por função.
+
+    Todo acesso é por ``get`` com padrão, de propósito. Este relatório é a
+    única saída de uma execução que já custou tempo e requisição paga; uma
+    chave faltando — porque o JSON veio de outra versão, ou porque uma função
+    nova do avaliador ainda não preenche o campo — não pode derrubar a
+    impressão e levar junto tudo que já foi apurado. Campo ausente aparece como
+    ausente; o resto continua legível.
+    """
+    inicio, fim = _linhas_da_funcao(f)
+    print(f"\n{f.get('arquivo', '?')}:{inicio}  {f.get('funcao', '?')}  "
+          f"({f.get('tamanho', '?')} linhas)")
     print(
-        f"  contável   ccn {f['complexidade']}  risco {f['risco']}  "
-        f"linha {_pct(f['cobertura_linha'])}  branch {_pct(f['cobertura_branch'])}"
+        f"  contável   ccn {f.get('complexidade', '?')}  risco {f.get('risco', '?')}  "
+        f"linha {_pct(f.get('cobertura_linha'))}  branch {_pct(f.get('cobertura_branch'))}"
     )
-    if f["notas"]:
-        julgado = "  ".join(f"{n.split('_')[0]} {v:.0%}" for n, v in f["notas"].items())
-        if f["nao_observadas"]:
-            ausentes = ", ".join(f"{n.split('_')[0]} n/d" for n in f["nao_observadas"])
+    notas = f.get("notas") or {}
+    if notas:
+        julgado = "  ".join(f"{n.split('_')[0]} {_pct(v)}" for n, v in notas.items())
+        nao_observadas = f.get("nao_observadas") or ()
+        if nao_observadas:
+            ausentes = ", ".join(f"{n.split('_')[0]} n/d" for n in nao_observadas)
             julgado += f"  [{ausentes}]"
         print(f"  julgado    {julgado}")
     # Quando não houve julgamento, o conselho é o mesmo texto para todas as
     # funções: repeti-lo por função transforma a explicação em ruído e esconde
     # as linhas que de fato variam.
-    if f["veredito"] != "sem_julgamento":
-        print(f"  → {f['conselho']}")
-    nota = "sem nota" if f["nota"] is None else f"nota {f['nota']}/100 ({f['faixa']})"
-    print(f"  {nota} · {f['veredito'].upper()} · prioridade {f['prioridade']}")
-    if f["graves"]:
+    veredito = f.get("veredito") or "sem_julgamento"
+    if veredito != "sem_julgamento":
+        print(f"  → {f.get('conselho', '(sem conselho)')}")
+    nota_bruta = f.get("nota")
+    nota = (
+        "sem nota"
+        if nota_bruta is None
+        else f"nota {nota_bruta}/100 ({f.get('faixa', '?')})"
+    )
+    print(f"  {nota} · {veredito.upper()} · prioridade {f.get('prioridade', '?')}")
+    if f.get("graves"):
         print(f"  barrado por: {', '.join(f['graves'])}")
-    if f["duvidas"]:
+    if f.get("duvidas"):
         print(f"  revisar por: {', '.join(f['duvidas'])}")
 
 
 def _sem_chave(env: Path | None) -> str:
-    """A mensagem que separa os dois enganos que produzem a mesma tela em branco."""
-    onde = (
-        f"{env} não define a variável"
-        if env
-        else f"nenhum {ARQUIVO_ENV} encontrado a partir de {Path.cwd()}"
-    )
+    """A mensagem que separa os dois enganos que produzem a mesma tela em branco.
+
+    "Não existe `.env` nenhum" e "existe um e ele não tem a chave" pedem ações
+    opostas, e as duas aparecem como a mesma falta de saída. Dizer qual dos dois
+    aconteceu é a única informação que a mensagem acrescenta.
+
+    ``Path.cwd()`` pode levantar: o diretório de trabalho foi removido embaixo
+    do processo — comum em CI que apaga o workspace entre passos. Aqui isso não
+    pode virar exceção, porque esta função já está explicando outro erro e a
+    segunda falha apagaria a primeira.
+    """
+    if env:
+        onde = f"{env} não define a variável"
+    else:
+        onde = f"nenhum {ARQUIVO_ENV} encontrado a partir de {_diretorio_atual()}"
     return (
         f"defina {VARIAVEL_DA_CHAVE} no ambiente ou num {ARQUIVO_ENV} — {onde}.\n"
         "Ou rode com --sem-julgamento, que usa só o eixo contável."
     )
+
+
+def _diretorio_atual() -> str:
+    """O diretório de trabalho, ou um marcador quando ele não existe mais."""
+    try:
+        return str(Path.cwd())
+    except OSError:
+        return "(diretório de trabalho indisponível)"
 
 
 def principal(argv: list[str] | None = None) -> int:
