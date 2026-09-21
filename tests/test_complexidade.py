@@ -9,11 +9,23 @@ construída em cima desses números.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
+import lizard
 import pytest
 
-from jev_crap.metrica.complexidade import Funcao, analisar
+from jev_crap.metrica.complexidade import (
+    NOME_DESCONHECIDO,
+    Funcao,
+    _arquivos_candidatos,
+    _excluido,
+    _funcoes_do_arquivo,
+    _linguagem,
+    _nome,
+    _pular_pasta_ilegivel,
+    analisar,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures"
 AMOSTRA_PY = FIXTURES / "amostra.py"
@@ -284,13 +296,13 @@ def test_chave_separa_funcoes_de_mesmo_nome(tmp_path: Path) -> None:
     funcoes = analisar([str(tmp_path)])
 
     assert len({f.nome for f in funcoes}) < len(funcoes)
-    assert len({f.chave for f in funcoes}) == len(funcoes)
+    assert len({f.identidade for f in funcoes}) == len(funcoes)
 
 
 def test_chave_repete_entre_execucoes() -> None:
     """A chave precisa sobreviver entre rodadas para cruzar com a cobertura."""
-    primeira = sorted(f.chave for f in analisar([str(AMOSTRA_PY)]))
-    segunda = sorted(f.chave for f in analisar([str(AMOSTRA_PY)]))
+    primeira = sorted(f.identidade for f in analisar([str(AMOSTRA_PY)]))
+    segunda = sorted(f.identidade for f in analisar([str(AMOSTRA_PY)]))
 
     assert primeira == segunda
     assert all(chave.startswith(str(AMOSTRA_PY)) for chave in primeira)
@@ -309,3 +321,201 @@ def test_funcao_e_imutavel_e_hashavel() -> None:
 
 def test_lista_vazia_de_caminhos_nao_reclama() -> None:
     assert analisar([]) == []
+
+
+class TestIdentidade:
+    """`Funcao.identidade` é o que cruza a medição com o relatório de cobertura."""
+
+    def uma(self, **ajustes):
+        campos = dict(
+            arquivo="src/a.py", nome="f", linha_inicio=3, linha_fim=9,
+            complexidade=1, linhas_logicas=4, parametros=0, linguagem="python",
+        )
+        return Funcao(**{**campos, **ajustes})
+
+    def test_identidade_junta_arquivo_e_linha_inicial(self):
+        assert self.uma().identidade == "src/a.py:3"
+
+    def test_identidade_distingue_homonimas_no_mesmo_arquivo(self):
+        assert self.uma(linha_inicio=3).identidade != self.uma(linha_inicio=40).identidade
+
+    def test_identidade_recusa_arquivo_vazio(self):
+        with pytest.raises(ValueError, match="sem arquivo não tem identidade"):
+            _ = self.uma(arquivo="").identidade
+
+    def test_identidade_recusa_arquivo_so_de_espacos(self):
+        with pytest.raises(ValueError, match="sem arquivo"):
+            _ = self.uma(arquivo="   ").identidade
+
+    def test_identidade_recusa_linha_zero(self):
+        with pytest.raises(ValueError, match="linhas começam em 1"):
+            _ = self.uma(linha_inicio=0).identidade
+
+    def test_identidade_recusa_linha_negativa(self):
+        with pytest.raises(ValueError, match="linha_inicio"):
+            _ = self.uma(linha_inicio=-2).identidade
+
+    def test_identidade_cita_o_nome_da_funcao_no_erro(self):
+        with pytest.raises(ValueError, match="orfa"):
+            _ = self.uma(arquivo="", nome="orfa").identidade
+
+
+class TestExcluido:
+    def test_excluido_casa_padrao_sem_barra_em_qualquer_componente(self):
+        assert _excluido("a/node_modules/x.js", ["node_modules"])
+
+    def test_excluido_casa_glob_de_arquivo(self):
+        assert _excluido("a/app.min.js", ["*.min.js"])
+
+    def test_excluido_casa_padrao_com_barra_como_sufixo(self):
+        assert _excluido("app/src/legado", ["src/legado"])
+
+    def test_excluido_casa_padrao_com_barra_no_caminho_inteiro(self):
+        assert _excluido("src/legado", ["src/legado"])
+
+    def test_excluido_recusa_o_que_nao_casa(self):
+        assert not _excluido("src/app.py", ["node_modules", "*.min.js"])
+
+    def test_excluido_ignora_padrao_vazio(self):
+        assert not _excluido("src/app.py", [""])
+
+    def test_excluido_trata_padrao_invalido_como_nao_casa(self):
+        assert not _excluido("src/app.py", ["[nao-fecha"])
+
+    def test_excluido_segue_avaliando_os_padroes_depois_de_um_invalido(self):
+        assert _excluido("src/app.py", ["[nao-fecha", "src/app.py"])
+
+    def test_excluido_sem_padrao_nenhum_nao_exclui(self):
+        assert not _excluido("src/app.py", [])
+
+
+class TestNome:
+    def test_nome_troca_separador_de_escopo_por_ponto(self):
+        assert _nome("Classe::metodo") == "Classe.metodo"
+
+    def test_nome_colapsa_espacos_internos(self):
+        assert _nome("  a   b  ") == "a b"
+
+    def test_nome_preserva_nome_simples(self):
+        assert _nome("calcular") == "calcular"
+
+    def test_nome_devolve_marcador_para_texto_vazio(self):
+        assert _nome("") == NOME_DESCONHECIDO
+
+    def test_nome_devolve_marcador_para_texto_so_de_espacos(self):
+        assert _nome("   \t ") == NOME_DESCONHECIDO
+
+    def test_nome_devolve_marcador_para_valor_que_nao_e_texto(self):
+        assert _nome(None) == NOME_DESCONHECIDO
+
+    def test_nome_nunca_devolve_vazio(self):
+        for bruto in ("", "  ", None, 7, "::"):
+            assert _nome(bruto)
+
+
+class TestLinguagem:
+    class LeitorSemNomes:
+        pass
+
+    class LeitorComNomes:
+        language_names = ("rust",)
+
+    class LeitorComLixo:
+        language_names = 123
+
+    def test_linguagem_usa_o_mapa_proprio_quando_conhece_a_extensao(self):
+        assert _linguagem("a/b.h", self.LeitorComNomes) == "c"
+
+    def test_linguagem_cai_no_rotulo_do_lizard_para_extensao_de_fora(self):
+        assert _linguagem("a/b.zig", self.LeitorComNomes) == "rust"
+
+    def test_linguagem_usa_a_extensao_quando_o_leitor_nao_diz(self):
+        assert _linguagem("a/b.zig", self.LeitorSemNomes) == "zig"
+
+    def test_linguagem_ignora_language_names_de_tipo_errado(self):
+        assert _linguagem("a/b.zig", self.LeitorComLixo) == "zig"
+
+    def test_linguagem_devolve_desconhecida_sem_extensao(self):
+        assert _linguagem("Makefile", self.LeitorSemNomes) == "desconhecida"
+
+    def test_linguagem_nunca_devolve_vazio(self):
+        for caminho in ("a/b.py", "a/b.zig", "Makefile", ""):
+            assert _linguagem(caminho, self.LeitorSemNomes)
+
+
+class TestArquivosCandidatos:
+    def test_arquivos_candidatos_rende_o_arquivo_apontado_diretamente(self, tmp_path):
+        alvo = tmp_path / "a.py"
+        alvo.write_text("x", encoding="utf-8")
+        assert list(_arquivos_candidatos(str(alvo), ())) == [str(alvo)]
+
+    def test_arquivos_candidatos_desce_em_diretorio(self, tmp_path):
+        (tmp_path / "sub").mkdir()
+        (tmp_path / "sub" / "a.py").write_text("x", encoding="utf-8")
+        assert len(list(_arquivos_candidatos(str(tmp_path), ()))) == 1
+
+    def test_arquivos_candidatos_poda_pasta_excluida(self, tmp_path):
+        (tmp_path / "node_modules").mkdir()
+        (tmp_path / "node_modules" / "a.py").write_text("x", encoding="utf-8")
+        assert list(_arquivos_candidatos(str(tmp_path), ("node_modules",))) == []
+
+    def test_arquivos_candidatos_levanta_para_caminho_inexistente(self, tmp_path):
+        with pytest.raises(FileNotFoundError, match="inexistente"):
+            list(_arquivos_candidatos(str(tmp_path / "nada"), ()))
+
+    def test_arquivos_candidatos_distingue_ilegivel_de_inexistente(self, tmp_path, monkeypatch):
+        def explode(_self):
+            raise PermissionError("sem execução")
+
+        monkeypatch.setattr(Path, "exists", explode)
+        with pytest.raises(FileNotFoundError, match="ilegível"):
+            list(_arquivos_candidatos(str(tmp_path), ()))
+
+    def test_arquivos_candidatos_visita_em_ordem_alfabetica(self, tmp_path):
+        for nome in ("c.py", "a.py", "b.py"):
+            (tmp_path / nome).write_text("x", encoding="utf-8")
+        achados = [Path(c).name for c in _arquivos_candidatos(str(tmp_path), ())]
+        assert achados == ["a.py", "b.py", "c.py"]
+
+
+class TestPularPastaIlegivel:
+    def test_pular_pasta_ilegivel_nao_levanta(self):
+        assert _pular_pasta_ilegivel(PermissionError("x")) is None
+
+    def test_pular_pasta_ilegivel_registra_o_caminho(self, caplog):
+        erro = PermissionError("negado")
+        erro.filename = "/proibido"
+        with caplog.at_level(logging.DEBUG, logger="jev_crap.metrica.complexidade"):
+            _pular_pasta_ilegivel(erro)
+        assert "/proibido" in caplog.text
+
+    def test_pular_pasta_ilegivel_aceita_erro_sem_filename(self, caplog):
+        with caplog.at_level(logging.DEBUG, logger="jev_crap.metrica.complexidade"):
+            _pular_pasta_ilegivel(OSError("sem nome"))
+        assert "?" in caplog.text
+
+
+class TestFuncoesDoArquivo:
+    def test_funcoes_do_arquivo_mede_um_python_real(self):
+        assert _funcoes_do_arquivo(str(AMOSTRA_PY))
+
+    def test_funcoes_do_arquivo_pula_extensao_que_o_lizard_nao_le(self, tmp_path):
+        alvo = tmp_path / "leia.md"
+        alvo.write_text("# título", encoding="utf-8")
+        assert _funcoes_do_arquivo(str(alvo)) == []
+
+    def test_funcoes_do_arquivo_devolve_vazio_quando_a_analise_explode(self, monkeypatch):
+        def explode(_caminho):
+            raise RuntimeError("tokenizador")
+
+        monkeypatch.setattr(lizard, "analyze_file", explode)
+        assert _funcoes_do_arquivo(str(AMOSTRA_PY)) == []
+
+    def test_funcoes_do_arquivo_nao_levanta_com_arquivo_inexistente(self, tmp_path):
+        assert _funcoes_do_arquivo(str(tmp_path / "nao_existe.py")) == []
+
+    def test_funcoes_do_arquivo_normaliza_o_caminho(self, tmp_path):
+        alvo = tmp_path / "a.py"
+        alvo.write_text("def f():\n    return 1\n", encoding="utf-8")
+        medidas = _funcoes_do_arquivo(f"{tmp_path}/./a.py")
+        assert medidas[0].arquivo == str(alvo)

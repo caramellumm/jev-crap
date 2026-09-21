@@ -20,7 +20,7 @@ nome que muda quando o lizard muda de parser, e o erro apareceria lá na frente,
 como cobertura atribuída à função errada.
 
 Por isso `nome` serve para o humano ler, e **não** é chave. A chave estável é
-`Funcao.chave` — `arquivo:linha_inicio` — porque é o único identificador que
+`Funcao.identidade` — `arquivo:linha_inicio` — porque é o único identificador que
 também existe do outro lado do cruzamento: LCOV e Cobertura XML reportam
 arquivo e linha. (Os registros `FN` do LCOV até trazem nome, mas com a
 decoração de cada compilador, que não bate com a do lizard.)
@@ -35,13 +35,22 @@ outro).
 
 from __future__ import annotations
 
+import logging
 import os
+import re
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from fnmatch import fnmatch
 from pathlib import Path
 
 import lizard
+
+_log = logging.getLogger(__name__)
+
+#: O que entra no lugar de um nome que o lizard não soube dar. Texto e não
+#: vazio: uma linha de relatório sem nome nenhum não dá para localizar, e o
+#: rótulo entre colchetes não se confunde com identificador de verdade.
+NOME_DESCONHECIDO = "[sem nome]"
 
 EXCLUSOES_PADRAO: tuple[str, ...] = (
     ".git",
@@ -99,12 +108,28 @@ class Funcao:
     linguagem: str
 
     @property
-    def chave(self) -> str:
+    def identidade(self) -> str:
         """Identificador estável da função: `arquivo:linha_inicio`.
 
         Nome não serve de chave (veja o cabeçalho do módulo): há homônimos no
         mesmo arquivo e, em JavaScript, um monte de `(anonymous)`.
+
+        Os dois campos são conferidos antes de virar identidade, e aqui a
+        exceção é preferível ao valor torto: esta string é o que cruza a
+        medição com o relatório de cobertura. Uma identidade malformada não
+        casa com nada e a função aparece como 0% coberta — resposta errada,
+        plausível e silenciosa, que é a pior combinação das três. Falhar alto
+        transforma isso num defeito que alguém conserta.
         """
+        if not self.arquivo.strip():
+            raise ValueError(
+                f"Funcao sem arquivo não tem identidade estável (nome={self.nome!r})"
+            )
+        if self.linha_inicio < 1:
+            raise ValueError(
+                f"linha_inicio de {self.arquivo} é {self.linha_inicio}; "
+                "linhas começam em 1 e o cruzamento com cobertura depende disso"
+            )
         return f"{self.arquivo}:{self.linha_inicio}"
 
 
@@ -155,13 +180,32 @@ def analisar(caminhos: Sequence[str], excluir: Sequence[str] = ()) -> list[Funca
 
 
 def _arquivos_candidatos(caminho: str, padroes: Sequence[str]) -> Iterator[str]:
+    """Arquivos sob ``caminho`` que sobrevivem às exclusões, em ordem estável.
+
+    Três falhas são tratadas, e a diferença entre elas é o que esta função
+    decide:
+
+    - **caminho inexistente levanta.** É erro de quem chamou, e devolver vazio
+      esconderia um alvo digitado errado atrás de um relatório de zero função;
+    - **caminho ilegível levanta também**, traduzido: ``exists()`` devolve
+      ``False`` para um diretório sem permissão de execução, o que faria a
+      mensagem dizer "inexistente" sobre um caminho que existe e manda procurar
+      o erro de digitação que não há;
+    - **subpasta ilegível no meio da descida é pulada.** ``os.walk`` engole isso
+      em silêncio por padrão; o ``onerror`` aqui existe para que esse silêncio
+      seja uma escolha registrada, e não um padrão herdado sem querer.
+    """
     alvo = Path(caminho)
-    if not alvo.exists():
+    try:
+        existe = alvo.exists()
+    except OSError as erro:
+        raise FileNotFoundError(f"caminho ilegível: {caminho} ({erro})") from erro
+    if not existe:
         raise FileNotFoundError(f"caminho inexistente: {caminho}")
     if alvo.is_file():
         yield str(alvo)
         return
-    for raiz, subpastas, nomes in os.walk(alvo):
+    for raiz, subpastas, nomes in os.walk(alvo, onerror=_pular_pasta_ilegivel):
         # Atribuir em fatia é o que faz o os.walk realmente não descer na pasta;
         # filtrar uma cópia só esconderia os arquivos, depois de já tê-los lido.
         subpastas[:] = sorted(
@@ -175,15 +219,47 @@ def _arquivos_candidatos(caminho: str, padroes: Sequence[str]) -> Iterator[str]:
                 yield completo
 
 
+def _pular_pasta_ilegivel(erro: OSError) -> None:
+    """Callback de ``os.walk`` para diretório que não deu para ler.
+
+    O padrão de ``os.walk`` é engolir o erro sem deixar rastro. Registrar em
+    ``debug`` mantém a varredura viva — uma pasta sem permissão não pode zerar
+    o relatório do repositório — e ainda assim deixa o motivo disponível para
+    quem for investigar por que uma função esperada não apareceu.
+
+    ``filename`` é atributo de ``OSError`` que existe sempre, mas vale ``None``
+    quando ninguém o preencheu — então o padrão do ``getattr`` nunca entraria e
+    a linha de log diria "pulando None", que não ajuda ninguém a achar a pasta.
+    """
+    _log.debug("pulando %s: %s", getattr(erro, "filename", None) or "?", erro)
+
+
 def _excluido(caminho: str, padroes: Sequence[str]) -> bool:
+    """Se ``caminho`` casa com algum padrão de exclusão.
+
+    Padrão vazio é descartado em vez de aplicado: ``fnmatch(x, "")`` é falso
+    para tudo, então ele não faria mal — mas um ``--excluir ""`` vindo de um
+    shell que expandiu uma variável vazia é engano de quem chamou, e ignorá-lo
+    explicitamente é mais honesto que deixá-lo passar por acaso.
+
+    Padrão sintaticamente inválido (um ``[`` sem fechar, que vem de um glob
+    escrito à mão) faz ``fnmatch`` levantar ``re.error``. Aqui ele é tratado
+    como "não casa": uma exclusão que não compila deve deixar o arquivo passar
+    e ser medido, nunca abortar a varredura do repositório inteiro.
+    """
     partes = Path(caminho).parts
     inteiro = Path(caminho).as_posix()
     for padrao in padroes:
-        if "/" in padrao:
-            if fnmatch(inteiro, padrao) or fnmatch(inteiro, f"*/{padrao}"):
+        if not padrao:
+            continue
+        try:
+            if "/" in padrao:
+                if fnmatch(inteiro, padrao) or fnmatch(inteiro, f"*/{padrao}"):
+                    return True
+            elif any(fnmatch(parte, padrao) for parte in partes):
                 return True
-        elif any(fnmatch(parte, padrao) for parte in partes):
-            return True
+        except re.error:
+            continue
     return False
 
 
@@ -219,16 +295,41 @@ def _funcoes_do_arquivo(caminho: str) -> list[Funcao]:
 
 
 def _linguagem(caminho: str, leitor: type) -> str:
+    """O nome da linguagem, preferindo o mapa próprio ao rótulo do lizard.
+
+    Nunca levanta, e nunca devolve vazio: o valor vai para o `state` que o
+    modelo lê, e uma linguagem em branco ali faz o julgamento ser feito sem
+    saber de que linguagem se trata — pior que o palpite "desconhecida", que
+    pelo menos é legível como o que é.
+
+    ``language_names`` é atributo de classe do leitor do lizard, não contrato
+    estável: versão nova pode não trazê-lo, trazê-lo vazio ou trazer algo que
+    não é sequência de texto. Os três casos caem no mesmo lugar.
+    """
     extensao = Path(caminho).suffix.lstrip(".").lower()
     if extensao in _LINGUAGEM_POR_EXTENSAO:
         return _LINGUAGEM_POR_EXTENSAO[extensao]
-    nomes: Sequence[str] = getattr(leitor, "language_names", ())
-    return nomes[0] if nomes else (extensao or "desconhecida")
+    nomes = getattr(leitor, "language_names", ())
+    if isinstance(nomes, (list, tuple)) and nomes and isinstance(nomes[0], str):
+        return nomes[0]
+    return extensao or "desconhecida"
 
 
 def _nome(bruto: str) -> str:
-    """Normaliza o nome vindo do lizard (veja a explicação no topo do módulo)."""
-    return " ".join(bruto.replace("::", ".").split())
+    """Normaliza o nome vindo do lizard (veja a explicação no topo do módulo).
+
+    ``bruto`` vem de biblioteca de terceiro, então o tipo é conferido em vez de
+    presumido: um ``None`` levantaria ``AttributeError`` dentro da medição, e o
+    relatório perderia o arquivo inteiro por causa de uma função. Nome ausente
+    vira ``NOME_DESCONHECIDO``, que é legível e não se confunde com nome real.
+
+    Nome só de espaços cairia em string vazia depois do ``split`` — e função
+    sem nome nenhum no relatório é linha que ninguém consegue localizar.
+    """
+    if not isinstance(bruto, str):
+        return NOME_DESCONHECIDO
+    limpo = " ".join(bruto.replace("::", ".").split())
+    return limpo or NOME_DESCONHECIDO
 
 
 def medir_fonte(nome_do_arquivo: str, codigo: str) -> list[Funcao]:
