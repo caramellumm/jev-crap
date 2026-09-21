@@ -123,11 +123,36 @@ def _arquivos_de_teste(raiz: Path) -> Iterable[Path]:
     A comparação de ``parece_teste`` é feita contra ``raiz.parent`` de propósito:
     quem passa ``tests/`` como pasta de testes quer que o próprio nome ``tests``
     conte como marca, e relativizar contra a própria ``raiz`` o apagaria.
+
+    Dois erros de disco são engolidos aqui, e os dois pelo mesmo motivo: esta
+    busca é uma conveniência, não a resposta. Deixar de achar um trecho de teste
+    faz a pergunta sobre teste não ser feita — resultado degradado mas correto;
+    deixar a exceção subir aborta a avaliação inteira por causa de um diretório
+    que nem era para ser lido.
+
+    - **``rglob`` levanta no meio da travessia.** Uma pasta sem permissão de
+      leitura sob ``tests/`` derruba a iteração *depois* de já ter rendido
+      parte dos arquivos, e o ``sorted`` faz isso acontecer antes de qualquer
+      resultado sair;
+    - **``is_file`` levanta no arquivo.** Link simbólico quebrado, montagem que
+      sumiu, nome longo demais para o sistema de arquivos.
     """
-    for arquivo in sorted(raiz.rglob("*")):
+    try:
+        candidatos = sorted(raiz.rglob("*"))
+    except OSError:
+        # Nem a listagem foi possível: raiz ilegível, ou ciclo de link
+        # simbólico. Não há o que procurar, e isso não é erro de quem chamou.
+        return
+
+    for arquivo in candidatos:
         if set(arquivo.parts) & IGNORAR:
             continue
-        if arquivo.suffix not in EXTENSOES or not arquivo.is_file():
+        if arquivo.suffix not in EXTENSOES:
+            continue
+        try:
+            if not arquivo.is_file():
+                continue
+        except OSError:
             continue
         if not parece_teste(arquivo, raiz.parent):
             continue
@@ -146,7 +171,15 @@ def _trecho_ao_redor(texto: str, posicao: int) -> str | None:
 
     Não achar cabeçalho nenhum é a resposta certa para o caso chato: a menção
     está fora de qualquer função de teste. Menção fora de teste não é teste.
+
+    ``posicao`` é conferida contra o texto antes de virar índice. Um valor
+    negativo ou além do fim não levanta em Python — fatiar aceita qualquer
+    número —, e é justamente por isso que precisa de guarda: o recorte sairia
+    vazio ou deslocado, e o modelo julgaria "não há teste" sobre um trecho que
+    o código escolheu errado. Falha silenciosa vale menos que ``None``.
     """
+    if not texto or not 0 <= posicao <= len(texto):
+        return None
     cabecalhos = [m.start() for m in INICIO_DE_TESTE.finditer(texto, 0, posicao)]
     if not cabecalhos or posicao - cabecalhos[-1] > ALCANCE_DO_CABECALHO:
         return None

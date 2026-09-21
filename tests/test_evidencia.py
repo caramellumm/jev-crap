@@ -7,9 +7,19 @@ começava no import em vez do corpo do teste. As duas têm teste próprio aqui.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
-from jev_crap.evidencia import MARCAS_DE_TESTE, parece_teste, testes_de
+from jev_crap.evidencia import (
+    ALCANCE_DO_CABECALHO,
+    JANELA_DEPOIS,
+    MARCAS_DE_TESTE,
+    _arquivos_de_teste,
+    _trecho_ao_redor,
+    parece_teste,
+    testes_de,
+)
 
 
 class TestPareceTeste:
@@ -115,3 +125,86 @@ class TestTechosDeTeste:
         )
         trechos = testes_de("somarCarrinho", pasta)
         assert trechos and "it('soma os itens'" in trechos[0]
+
+
+class TestArquivosDeTeste:
+    """`_arquivos_de_teste` percorre o disco: o que ele engole importa."""
+
+    def test_arquivos_de_teste_acha_o_que_parece_teste(self, tmp_path):
+        (tmp_path / "tests").mkdir()
+        alvo = tmp_path / "tests" / "test_x.py"
+        alvo.write_text("def test_x(): pass", encoding="utf-8")
+        assert list(_arquivos_de_teste(tmp_path / "tests")) == [alvo]
+
+    def test_arquivos_de_teste_ignora_extensao_de_fora(self, tmp_path):
+        (tmp_path / "tests").mkdir()
+        (tmp_path / "tests" / "test_x.md").write_text("texto", encoding="utf-8")
+        assert list(_arquivos_de_teste(tmp_path / "tests")) == []
+
+    def test_arquivos_de_teste_ignora_pasta_podada(self, tmp_path):
+        alvo = tmp_path / "tests" / "node_modules"
+        alvo.mkdir(parents=True)
+        (alvo / "test_x.py").write_text("x", encoding="utf-8")
+        assert list(_arquivos_de_teste(tmp_path / "tests")) == []
+
+    def test_arquivos_de_teste_devolve_vazio_para_raiz_inexistente(self, tmp_path):
+        assert list(_arquivos_de_teste(tmp_path / "nao_existe")) == []
+
+    def test_arquivos_de_teste_nao_levanta_quando_a_listagem_falha(self, tmp_path, monkeypatch):
+        def explode(_self, _padrao):
+            raise PermissionError("sem leitura")
+
+        monkeypatch.setattr(Path, "rglob", explode)
+        assert list(_arquivos_de_teste(tmp_path)) == []
+
+    def test_arquivos_de_teste_pula_arquivo_cujo_is_file_falha(self, tmp_path, monkeypatch):
+        (tmp_path / "tests").mkdir()
+        (tmp_path / "tests" / "test_x.py").write_text("x", encoding="utf-8")
+
+        def explode(_self):
+            raise OSError("link quebrado")
+
+        monkeypatch.setattr(Path, "is_file", explode)
+        assert list(_arquivos_de_teste(tmp_path / "tests")) == []
+
+    def test_arquivos_de_teste_devolve_em_ordem_estavel(self, tmp_path):
+        pasta = tmp_path / "tests"
+        pasta.mkdir()
+        for nome in ("test_c.py", "test_a.py", "test_b.py"):
+            (pasta / nome).write_text("x", encoding="utf-8")
+        nomes = [a.name for a in _arquivos_de_teste(pasta)]
+        assert nomes == sorted(nomes)
+
+
+class TestTrechoAoRedor:
+    TEXTO = "import x\n\ndef test_soma():\n    assert soma(1, 2) == 3\n"
+
+    def test_trecho_ao_redor_comeca_no_cabecalho_do_teste(self):
+        posicao = self.TEXTO.index("soma(1, 2)")
+        assert _trecho_ao_redor(self.TEXTO, posicao).startswith("def test_soma():")
+
+    def test_trecho_ao_redor_devolve_none_sem_cabecalho_antes(self):
+        assert _trecho_ao_redor("assert soma(1) == 1", 7) is None
+
+    def test_trecho_ao_redor_devolve_none_com_cabecalho_longe_demais(self):
+        texto = "def test_x():\n" + " " * (ALCANCE_DO_CABECALHO + 10) + "soma()"
+        assert _trecho_ao_redor(texto, len(texto) - 3) is None
+
+    def test_trecho_ao_redor_devolve_none_para_texto_vazio(self):
+        assert _trecho_ao_redor("", 0) is None
+
+    def test_trecho_ao_redor_devolve_none_para_posicao_negativa(self):
+        posicao = self.TEXTO.index("soma(1, 2)")
+        assert _trecho_ao_redor(self.TEXTO, -posicao) is None
+
+    def test_trecho_ao_redor_devolve_none_para_posicao_alem_do_fim(self):
+        assert _trecho_ao_redor(self.TEXTO, len(self.TEXTO) + 1) is None
+
+    def test_trecho_ao_redor_aceita_posicao_no_ultimo_indice(self):
+        assert _trecho_ao_redor(self.TEXTO, len(self.TEXTO)) is not None
+
+    def test_trecho_ao_redor_nao_passa_da_janela_depois(self):
+        cauda = "z" * (JANELA_DEPOIS * 2)
+        texto = f"def test_x():\n    soma()\n{cauda}"
+        posicao = texto.index("soma()")
+        assert len(_trecho_ao_redor(texto, posicao)) <= posicao + JANELA_DEPOIS
