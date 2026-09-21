@@ -121,7 +121,7 @@ class TestRegra4E5AusenciaDeDadoNaoEZero:
         sem_dados = FuncaoMedida(
             **{**medida.__dict__, "cobertura_linha": SEM_DADOS, "cobertura_branch": SEM_DADOS}
         )
-        corpo = decidida(sem_dados, RESPOSTAS_BOAS, config, rubrica).para_dict()
+        corpo = decidida(sem_dados, RESPOSTAS_BOAS, config, rubrica).para_avaliacao()
         assert corpo["cobertura_linha"] is None
         assert corpo["cobertura_branch"] is None
 

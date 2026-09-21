@@ -35,7 +35,7 @@ class TestValoresTortos:
     def test_os_avisos_chegam_ao_relatorio(self):
         """Aviso que fica só no log some dentro do cliente MCP."""
         config = Config.do_ambiente({"JEV_CRAP_LIMIAR": "torto"})
-        assert config.para_dict()["avisos_de_configuracao"]
+        assert config.para_regua()["avisos_de_configuracao"]
 
     def test_virgula_decimal_funciona(self):
         """Quem escreve em português digita 0,8 sem pensar duas vezes."""
@@ -67,7 +67,7 @@ class TestSegredo:
         como vazamento costuma começar."""
         config = Config.do_ambiente({"TYPESAFE_API_KEY": "segredo-de-verdade"})
         assert "segredo-de-verdade" not in repr(config)
-        assert "segredo-de-verdade" not in str(config.para_dict())
+        assert "segredo-de-verdade" not in str(config.para_regua())
 
 
 class TestExclusoes:

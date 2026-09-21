@@ -133,7 +133,7 @@ class FuncaoMedida:
         """Linhas físicas que a função ocupa, pontas incluídas."""
         return self.linha_fim - self.linha_inicio + 1
 
-    def para_dict(self) -> dict[str, Any]:
+    def para_medicao(self) -> dict[str, Any]:
         return {
             "chave": self.chave,
             "arquivo": self.arquivo,
@@ -173,9 +173,9 @@ class FuncaoAvaliada:
     def faixa(self) -> str:
         return faixa_da_nota(self.nota)
 
-    def para_dict(self, *, com_respostas: bool = True) -> dict[str, Any]:
+    def para_avaliacao(self, *, com_respostas: bool = True) -> dict[str, Any]:
         corpo: dict[str, Any] = {
-            **self.medida.para_dict(),
+            **self.medida.para_medicao(),
             "nota": self.nota,
             "faixa": self.faixa,
             "notas": {n: round(v, 3) for n, v in self.notas.items()},
@@ -510,7 +510,7 @@ def relatorio_contavel(medicao: Medicao, config: Config) -> dict[str, Any]:
             "omitidas_do_relatorio": max(0, len(acima) - len(mostradas)),
         },
         "funcoes": [
-            {**f.para_dict(), "interpretacao": medicao.formula.interpretar(f.risco)}
+            {**f.para_medicao(), "interpretacao": medicao.formula.interpretar(f.risco)}
             for f in mostradas
         ],
         "avisos": list(medicao.avisos),
@@ -519,7 +519,7 @@ def relatorio_contavel(medicao: Medicao, config: Config) -> dict[str, Any]:
             "comportamento ou só executam linhas. Essas duas decidem entre escrever teste e "
             "refatorar — só avaliar_arquivos as responde."
         ),
-        "regua": config.para_dict(),
+        "regua": config.para_regua(),
     }
 
 
@@ -926,10 +926,10 @@ def avaliar(
         "resumo": _resumo(medicao, avaliadas, mostradas, a_julgar),
         "eixo_semantico": _estado_do_eixo(julgador, com_julgamento, len(a_julgar)),
         "custo": _estimar_custo(a_julgar, config),
-        "funcoes": [f.para_dict() for f in mostradas],
+        "funcoes": [f.para_avaliacao() for f in mostradas],
         "falhas": falhas,
         "avisos": avisos,
-        "regua": config.para_dict(),
+        "regua": config.para_regua(),
         "como_ler": COMO_LER,
     }
 
@@ -1126,10 +1126,10 @@ def julgar_trecho(
         )
 
     return {
-        "funcao": avaliada.para_dict(),
+        "funcao": avaliada.para_avaliacao(),
         "custo": _estimar_custo([medida], config),
         "avisos": avisos,
-        "regua": config.para_dict(),
+        "regua": config.para_regua(),
         "como_ler": COMO_LER,
     }
 

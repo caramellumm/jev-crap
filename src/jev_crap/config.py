@@ -319,7 +319,7 @@ class Config:
         """
         return (*self.excluir, *(item for item in extras if item))
 
-    def para_dict(self) -> dict[str, object]:
+    def para_regua(self) -> dict[str, object]:
         """Versão serializável, para o relatório dizer sob qual régua ele foi feito."""
         return {
             "raiz": str(self.raiz),

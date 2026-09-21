@@ -410,7 +410,7 @@ def criar_servidor(
         """
         try:
             return {
-                "rubrica": regua.para_dict(),
+                "rubrica": regua.para_rubrica(),
                 "grupos": {
                     "qualidade": (
                         "Dimensões compensáveis: a média ponderada delas é a nota. "
@@ -443,7 +443,7 @@ def criar_servidor(
                     {"a_partir_de": piso, "faixa": nome} for piso, nome in avaliacao.FAIXAS
                 ],
                 "como_ler": avaliacao.COMO_LER,
-                "configuracao": ajuste.para_dict(),
+                "configuracao": ajuste.para_regua(),
             }
         except Exception as erro:
             raise _erro(erro) from erro

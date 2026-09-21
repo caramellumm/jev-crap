@@ -113,7 +113,7 @@ class Episodio:
     limiar e quebrou mesmo assim).
     """
 
-    def para_dict(self) -> dict[str, Any]:
+    def para_linha_de_historico(self) -> dict[str, Any]:
         return asdict(self)
 
     @classmethod
@@ -171,7 +171,11 @@ class Repositorio:
         completo = ep
         if not ep.id or not ep.em:
             completo = Episodio.de_dict(
-                {**ep.para_dict(), "id": ep.id or uuid.uuid4().hex, "em": ep.em or agora_iso()}
+                {
+                    **ep.para_linha_de_historico(),
+                    "id": ep.id or uuid.uuid4().hex,
+                    "em": ep.em or agora_iso(),
+                }
             )
         self._anexar(completo)
         return completo
@@ -235,7 +239,7 @@ class Repositorio:
 
         atualizado = Episodio.de_dict(
             {
-                **original.para_dict(),
+                **original.para_linha_de_historico(),
                 "acao": original.acao if acao is None else acao,
                 "aceita": original.aceita if aceita is None else aceita,
                 "risco_depois": original.risco_depois if risco_depois is None else risco_depois,
@@ -247,6 +251,6 @@ class Repositorio:
 
     def _anexar(self, ep: Episodio) -> None:
         self.caminho.parent.mkdir(parents=True, exist_ok=True)
-        linha = json.dumps(ep.para_dict(), ensure_ascii=False, sort_keys=True)
+        linha = json.dumps(ep.para_linha_de_historico(), ensure_ascii=False, sort_keys=True)
         with self.caminho.open("a", encoding="utf-8") as arquivo:
             arquivo.write(linha + "\n")

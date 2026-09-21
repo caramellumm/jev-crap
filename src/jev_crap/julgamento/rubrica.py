@@ -214,7 +214,7 @@ class Rubrica:
             raise RubricaInvalida(f"{nome}: um score precisa de ao menos dois níveis")
         return bruto / divisor
 
-    def para_dict(self) -> dict[str, Any]:
+    def para_rubrica(self) -> dict[str, Any]:
         """A régua em formato serializável, para a ferramenta poder explicar a si mesma."""
         return {
             "versao": self.versao,
