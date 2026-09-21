@@ -24,6 +24,7 @@ Duas decisões guiam o módulo:
 
 from __future__ import annotations
 
+import math
 import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -126,7 +127,21 @@ VARIAVEIS: tuple[str, ...] = (
 
 
 def _texto(ambiente: Mapping[str, str], variavel: str) -> str:
-    return (ambiente.get(variavel) or "").strip()
+    """O valor da variável como texto limpo; ``""`` quando ela não serve.
+
+    Uma variável ausente, vazia ou só de espaços são o mesmo caso para todo
+    chamador daqui — "não foi configurada" — e colapsá-las num só valor evita
+    que cada um deles reimplemente a distinção, sempre um pouco diferente.
+
+    ``os.environ`` só guarda texto, mas ``Config.do_ambiente`` aceita qualquer
+    ``Mapping``, e em teste é comum passar um dicionário com número dentro. Sem
+    a conversão, o ``.strip()`` levantaria ``AttributeError`` com uma mensagem
+    que não menciona nem a variável nem o valor.
+    """
+    bruto = ambiente.get(variavel)
+    if bruto is None:
+        return ""
+    return str(bruto).strip()
 
 
 def _numero(
@@ -138,13 +153,33 @@ def _numero(
     minimo: float | None = None,
     maximo: float | None = None,
 ) -> float | None:
+    """Um número vindo do ambiente, ou o padrão com um aviso dizendo por quê.
+
+    Nenhuma configuração malformada derruba a montagem: ela vira aviso e o
+    padrão vale. A razão é que a lista de avisos sai no relatório, em
+    ``regua.avisos_de_configuracao`` — quem vê um número estranho descobre ali
+    que a variável dele foi ignorada, o que uma exceção na inicialização do
+    servidor MCP (que ninguém vê, porque some no stderr do processo filho) não
+    contaria.
+
+    A vírgula é aceita como separador decimal porque `0,8` é o que sai de um
+    teclado brasileiro, e recusá-lo produziria "não é um número" para algo que
+    todo mundo lê como número.
+    """
     bruto = _texto(ambiente, variavel)
     if not bruto:
         return padrao
     try:
         valor = float(bruto.replace(",", "."))
-    except ValueError:
+    except (TypeError, ValueError):
         avisos.append(f"{variavel}={bruto!r} não é um número; usando {padrao!r}")
+        return padrao
+    if not math.isfinite(valor):
+        # `float("nan")` e `float("inf")` são conversões bem-sucedidas: sem esta
+        # guarda, JEV_CRAP_LIMIAR=nan passaria, e toda comparação `risco >=
+        # limiar` daria falso — a varredura sairia "0 acima do limiar" sem erro
+        # nenhum, que é a forma mais cara de errar que esta ferramenta tem.
+        avisos.append(f"{variavel}={bruto!r} não é um número finito; usando {padrao!r}")
         return padrao
     if minimo is not None and valor < minimo:
         avisos.append(f"{variavel}={bruto!r} é menor que {minimo}; usando {padrao!r}")
@@ -163,8 +198,17 @@ def _inteiro(
     *,
     minimo: int = 1,
 ) -> int:
+    """Um contador vindo do ambiente, truncado para inteiro.
+
+    Trunca em vez de arredondar porque todo uso daqui é de teto — quantas
+    funções julgar, quantas linhas enviar, quantas mostrar. Arredondar `4.7`
+    para 5 gastaria uma chamada a mais do que o configurado pediu, e teto que
+    estoura não é teto.
+    """
     valor = _numero(ambiente, variavel, float(padrao), avisos, minimo=float(minimo))
-    return int(valor) if valor is not None else padrao
+    if valor is None:
+        return padrao
+    return int(valor)
 
 
 @dataclass(frozen=True)
@@ -224,6 +268,19 @@ class Config:
         dentro) para que o teste descreva um cenário sem mexer no processo —
         variável de ambiente é estado global, e teste que a altera passa a
         depender da ordem em que roda.
+
+        **Isto não levanta.** Toda variável passa por um leitor que, diante de
+        valor inválido, acrescenta um aviso e devolve o padrão: o resultado é
+        sempre uma ``Config`` utilizável, no pior caso a padrão inteira com a
+        lista de avisos explicando o que foi ignorado. A razão é onde esta
+        função roda — na inicialização do servidor MCP, cujo stderr o cliente
+        descarta: uma exceção aqui deixaria a pessoa sem ferramenta e sem
+        mensagem, enquanto o aviso chega a ela dentro da resposta da tool, em
+        ``regua.avisos_de_configuracao``.
+
+        Nada é escrito, lido de disco ou enviado: a montagem só lê o mapa que
+        recebeu. O que se perde num valor mal configurado é o ajuste daquele
+        valor, e o aviso diz qual foi.
         """
         fonte: Mapping[str, str] = os.environ if ambiente is None else ambiente
         avisos: list[str] = []
@@ -259,15 +316,37 @@ class Config:
 
     @staticmethod
     def _raiz(fonte: Mapping[str, str], raiz: Path | str | None) -> Path:
+        """A raiz do projeto analisado: argumento, variável, ou o cwd.
+
+        Nunca levanta, e a razão é que esta é a primeira decisão da montagem:
+        uma falha aqui acontece antes de qualquer mensagem útil existir. Os
+        dois modos de falha reais são ``expanduser`` sem ``HOME`` (contêiner com
+        usuário sem entrada em ``/etc/passwd``) e ``cwd`` apagado embaixo do
+        processo (CI que limpa o workspace entre passos); os dois caem em algo
+        utilizável em vez de derrubar o servidor MCP na inicialização, onde o
+        traceback some no stderr do processo filho.
+        """
         if raiz is not None:
-            return Path(raiz).expanduser()
+            return _expandir(str(raiz))
         declarada = _texto(fonte, VARIAVEL_RAIZ)
-        return Path(declarada).expanduser() if declarada else Path.cwd()
+        if declarada:
+            return _expandir(declarada)
+        try:
+            return Path.cwd()
+        except OSError:
+            return Path(".")
 
     @staticmethod
     def _episodios(fonte: Mapping[str, str]) -> Path | None:
+        """Onde gravar o histórico, ou ``None`` para o lugar padrão do projeto.
+
+        ``None`` e um caminho são respostas diferentes e ambas válidas: ``None``
+        delega a escolha a ``aprendizado.caminho_padrao``, que a toma em função
+        da raiz do projeto. Devolver um caminho inventado aqui tiraria dele essa
+        decisão e espalharia a regra por dois lugares.
+        """
         declarado = _texto(fonte, VARIAVEL_EPISODIOS)
-        return Path(declarado).expanduser() if declarado else None
+        return _expandir(declarado) if declarado else None
 
     @staticmethod
     def _formula(fonte: Mapping[str, str], avisos: list[str]) -> str:
@@ -285,12 +364,33 @@ class Config:
 
     @staticmethod
     def _lista(fonte: Mapping[str, str], variavel: str) -> tuple[str, ...]:
+        """Uma lista separada por vírgula, sem itens vazios.
+
+        Itens vazios são descartados em vez de preservados porque a lista vira
+        padrão de exclusão: um item `""` casaria de formas imprevisíveis no
+        ``fnmatch`` e poderia podar mais do que se pediu. E eles aparecem
+        sozinhos — `"a,,b"` e `"a,b,"` saem de shell que concatena variáveis, e
+        de gente que deixa a vírgula final.
+        """
         bruto = _texto(fonte, variavel)
+        if not bruto:
+            return ()
         return tuple(item.strip() for item in bruto.split(",") if item.strip())
 
     def obter_formula(self) -> Formula:
-        """A fórmula de risco configurada, já instanciada."""
-        return obter_formula(self.formula)
+        """A fórmula de risco configurada, já instanciada.
+
+        Cai na padrão se o nome guardado não resolver. Não deveria acontecer —
+        ``_formula`` confere o nome contra o registro na montagem —, mas o
+        registro é global e mutável: um plugin que remova uma fórmula depois de
+        a configuração ter sido lida deixaria este nome órfão. Levantar aqui
+        derrubaria uma avaliação por causa de um registro que mudou; cair na
+        clássica devolve um número comparável e explicado.
+        """
+        try:
+            return obter_formula(self.formula)
+        except ValueError:
+            return obter_formula(FORMULA_PADRAO)
 
     def limiar_efetivo(self, formula: Formula, pedido: float | None = None) -> float:
         """O limiar que vale nesta chamada.
@@ -299,16 +399,38 @@ class Config:
         que a fórmula recomenda. O parâmetro da tool ganha porque limiar é
         decisão de quem está olhando o relatório agora — é ele que sabe se está
         varrendo um módulo crítico ou um script descartável.
+
+        Valor não numérico ou não finito em qualquer dos três níveis cai para o
+        próximo, em vez de levantar: um ``nan`` aqui faria toda comparação
+        ``risco >= limiar`` dar falso e a varredura terminaria dizendo "nenhuma
+        função acima do limiar" — resultado caro, plausível e errado.
         """
-        if pedido is not None:
-            return float(pedido)
-        if self.limiar is not None:
-            return float(self.limiar)
+        escolhido = _finito(pedido)
+        if escolhido is not None:
+            return escolhido
+        escolhido = _finito(self.limiar)
+        if escolhido is not None:
+            return escolhido
         return float(formula.limiar_padrao())
 
     def repositorio(self) -> Repositorio:
-        """O histórico de episódios deste projeto."""
-        return Repositorio(self.caminho_episodios, raiz_projeto=self.raiz)
+        """O histórico de episódios deste projeto.
+
+        Construir não toca em disco — o diretório nasce na primeira gravação —,
+        então chamar isto para só perguntar ao histórico não deixa rastro num
+        projeto onde ninguém registrou nada.
+
+        Um caminho que não **nomeia um arquivo** é tratado como ausente e
+        delega ao padrão. ``Path("")``, ``Path(".")`` e ``Path("/")`` têm
+        ``name`` vazio: os três apontam para um diretório, e gravar o histórico
+        num diretório falha com ``IsADirectoryError`` na primeira tool que
+        registrar algo — bem longe da variável de ambiente exportada vazia que
+        causou tudo, que é exatamente o caso de "não configurei nada".
+        """
+        caminho = self.caminho_episodios
+        if caminho is not None and not Path(caminho).name.strip():
+            caminho = None
+        return Repositorio(caminho, raiz_projeto=self.raiz)
 
     def exclusoes(self, extras: Sequence[str] = ()) -> tuple[str, ...]:
         """Exclusões da configuração somadas às que a chamada trouxe.
@@ -316,16 +438,59 @@ class Config:
         As exclusões embutidas no analisador de complexidade não aparecem aqui:
         elas são sempre aplicadas por ele, e repeti-las daria a impressão de que
         removê-las desta lista as desliga.
+
+        Três cuidados com o que sai daqui, porque esta tupla vira padrão de
+        ``fnmatch`` aplicado a cada arquivo de cada varredura:
+
+        - **item vazio é descartado.** Ele aparece sozinho, de shell que
+          concatena variáveis, e casa de formas imprevisíveis;
+        - **tudo vira texto.** Um ``Path`` chegando em ``extras`` faria o
+          ``fnmatch`` levantar ``TypeError`` dentro do laço de arquivos, longe
+          de quem o passou;
+        - **repetido entra uma vez só,** na ordem da primeira aparição. Padrão
+          repetido não muda o resultado e custa uma passada de ``fnmatch`` por
+          arquivo — e a mesma exclusão vir da configuração e da chamada é o
+          caso comum, não o raro.
         """
-        return (*self.excluir, *(item for item in extras if item))
+        vistos: dict[str, None] = {}
+        for item in (*self.excluir, *extras):
+            if item is None:
+                continue
+            padrao = str(item).strip()
+            if padrao:
+                vistos.setdefault(padrao, None)
+        return tuple(vistos)
 
     def para_regua(self) -> dict[str, object]:
-        """Versão serializável, para o relatório dizer sob qual régua ele foi feito."""
+        """Versão serializável, para o relatório dizer sob qual régua ele foi feito.
+
+        Dois cuidados, e os dois existem porque este dicionário atravessa uma
+        fronteira JSON e acaba em log:
+
+        - **nada aqui pode deixar de serializar.** A régua é o rodapé de toda
+          resposta; um valor exótico num campo — um ``Path`` que alguém pôs em
+          ``excluir``, um ``Decimal`` vindo de configuração — derrubaria a
+          resposta inteira com erro de protocolo, trocando um relatório
+          completo por nada. Cada valor passa por ``_json_seguro``;
+        - **nenhum campo é lido do objeto por varredura.** A lista é escrita à
+          mão, campo a campo, justamente para que um atributo novo não entre na
+          resposta por acidente. Se um dia a configuração guardar algo sensível,
+          ele não vaza por esquecimento — precisa ser adicionado aqui de
+          propósito. É a mesma razão pela qual a chave do Jev nunca passa por
+          este módulo.
+
+        O que está em jogo se algo aqui sair errado é **a legenda, não o
+        resultado**: nenhum veredito, nota ou prioridade é calculado a partir
+        deste dicionário. Ele é montado depois de tudo decidido, só para o
+        relatório poder dizer sob qual régua foi feito. Um campo torto deixa a
+        legenda imprecisa; os números ao lado continuam os mesmos, e nada é
+        escrito em disco nem enviado a lugar nenhum por causa dele.
+        """
         return {
-            "raiz": str(self.raiz),
+            "raiz": _json_seguro(self.raiz),
             "formula": self.formula,
             "limiar_configurado": self.limiar,
-            "excluir": list(self.excluir),
+            "excluir": [_json_seguro(item) for item in self.excluir],
             "max_julgamentos": self.max_julgamentos,
             "max_no_relatorio": self.max_no_relatorio,
             "max_linhas": self.max_linhas,
@@ -334,13 +499,64 @@ class Config:
             "limite_tamanho": self.limite_tamanho,
             "limite_ccn": self.limite_ccn,
             "nota_minima": self.nota_minima,
-            "moeda": self.moeda,
-            "avisos_de_configuracao": list(self.avisos),
+            "moeda": _json_seguro(self.moeda),
+            "avisos_de_configuracao": [_json_seguro(aviso) for aviso in self.avisos],
         }
 
 
 def _fracao(
     ambiente: Mapping[str, str], variavel: str, padrao: float, avisos: list[str]
 ) -> float:
+    """Uma fração 0..1 do ambiente, com o padrão de volta quando não é uma.
+
+    Existe separado de :func:`_numero` por causa do tipo de retorno: os limiares
+    de probabilidade (bloqueio, suspeita) são sempre números, nunca ``None``.
+    Quem os usa compara direto — ``if p >= config.bloqueio`` — e um ``None``
+    escapando levantaria ``TypeError`` dentro do laço de funções, a uma camada
+    de distância da variável mal configurada que o causou.
+    """
     valor = _numero(ambiente, variavel, padrao, avisos, minimo=0.0, maximo=1.0)
     return padrao if valor is None else valor
+
+
+def _json_seguro(valor: object) -> object:
+    """O valor quando o JSON o aceita; o texto dele quando não.
+
+    Converter em vez de recusar: a régua é contexto do relatório, e perder o
+    relatório inteiro porque um campo dela veio com tipo inesperado seria
+    trocar a resposta pelo rodapé.
+    """
+    if isinstance(valor, (str, int, float, bool)) or valor is None:
+        return valor
+    try:
+        return str(valor)
+    except Exception:  # noqa: BLE001 - o rodapé nunca pode derrubar a resposta
+        return f"<{type(valor).__name__} não textualizável>"
+
+
+def _expandir(bruto: str) -> Path:
+    """``Path(bruto).expanduser()``, tolerando ambiente sem diretório pessoal.
+
+    ``expanduser`` levanta ``RuntimeError`` quando o caminho começa com ``~`` e
+    nem ``HOME`` nem o banco de usuários sabem quem é — contêiner com usuário
+    sem entrada em ``/etc/passwd``, comum em CI. O ``~`` literal produz um
+    diretório de nome esquisito, mas a ferramenta continua rodando.
+    """
+    caminho = Path(bruto)
+    try:
+        return caminho.expanduser()
+    except RuntimeError:
+        return caminho
+
+
+def _finito(valor: object) -> float | None:
+    """O valor como float quando é número finito de verdade; ``None`` se não é.
+
+    ``bool`` é recusado apesar de ``isinstance(True, int)`` ser verdadeiro: um
+    ``True`` virando limiar ``1.0`` julgaria o repositório inteiro sem que
+    ninguém tivesse pedido isso.
+    """
+    if isinstance(valor, bool) or not isinstance(valor, (int, float)):
+        return None
+    numero = float(valor)
+    return numero if math.isfinite(numero) else None
