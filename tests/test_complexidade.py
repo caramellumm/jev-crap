@@ -397,7 +397,7 @@ class TestNome:
         assert _nome("  a   b  ") == "a b"
 
     def test_nome_preserva_nome_simples(self):
-        assert _nome("calcular") == "calcular"
+        assert _nome("rotina_qualquer") == "rotina_qualquer"
 
     def test_nome_devolve_marcador_para_texto_vazio(self):
         assert _nome("") == NOME_DESCONHECIDO

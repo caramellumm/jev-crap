@@ -371,6 +371,7 @@ def medir(
     nao_casados: set[str] = set()
     ambiguos: set[str] = set()
     sem_branch = 0
+    insumos_invalidos: list[str] = []
 
     medidas: list[FuncaoMedida] = []
     textos: dict[str, list[str]] = {}
@@ -391,12 +392,27 @@ def medir(
             if not cob.tem_dados_de_branch:
                 sem_branch += 1
 
-        insumos = Insumos(
-            complexidade=max(1, bruta.complexidade),
-            cobertura_linha=cobertura_linha,
-            cobertura_branch=None if cobertura_branch == SEM_DADOS else cobertura_branch,
-            linhas_logicas=max(0, bruta.linhas_logicas),
-        )
+        # Uma função com insumo inválido não pode derrubar a varredura inteira:
+        # cobertura acima de 1 num único arquivo (LCOV somando execuções em vez
+        # de linhas distintas, por exemplo) abortaria a medição de todo o
+        # repositório. A função vira "sem dados de cobertura" e a medição segue;
+        # o aviso registra qual foi, para que o defeito do relatório apareça.
+        try:
+            insumos = Insumos(
+                complexidade=max(1, bruta.complexidade),
+                cobertura_linha=cobertura_linha,
+                cobertura_branch=None if cobertura_branch == SEM_DADOS else cobertura_branch,
+                linhas_logicas=max(0, bruta.linhas_logicas),
+            )
+        except ValueError as erro:
+            insumos_invalidos.append(f"{bruta.arquivo}:{bruta.linha_inicio} ({erro})")
+            cobertura_linha = cobertura_branch = float(SEM_DADOS)
+            insumos = Insumos(
+                complexidade=max(1, bruta.complexidade),
+                cobertura_linha=cobertura_linha,
+                cobertura_branch=None,
+                linhas_logicas=max(0, bruta.linhas_logicas),
+            )
 
         codigo = ""
         testes: tuple[str, ...] = ()
@@ -424,6 +440,13 @@ def medir(
     avisos.extend(
         _avisos_de_cruzamento(relatorio, arquivos_vistos, nao_casados, ambiguos, sem_branch)
     )
+    if insumos_invalidos:
+        amostra = ", ".join(insumos_invalidos[:3])
+        avisos.append(
+            f"{len(insumos_invalidos)} função(ões) tiveram insumo de cobertura inválido e "
+            f"entraram como não medidas: {amostra}. Isso costuma ser defeito do relatório "
+            "(cobertura acima de 100% sai de somar execuções em vez de linhas distintas)"
+        )
     if not medidas:
         avisos.append(
             "nenhuma função foi encontrada — confira se o caminho tem código em linguagem "

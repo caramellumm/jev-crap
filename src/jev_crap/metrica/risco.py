@@ -23,11 +23,13 @@ produziria um número que não responde nenhuma das duas perguntas.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 __all__ = [
+    "COMPLEXIDADE_DE_REFERENCIA",
     "CrapClassico",
     "Formula",
     "Insumos",
@@ -37,6 +39,12 @@ __all__ = [
     "registrar_formula",
 ]
 
+#: A complexidade cujo risco, sem teste nenhum, define a linha de corte. Cinco
+#: é o ponto que dá exatamente 30 na fórmula clássica — o limiar da ferramenta
+#: original. Ele mora aqui, e não dentro de `limiar_padrao`, porque é a única
+#: escolha arbitrária da linha de corte: tudo mais é consequência da fórmula.
+COMPLEXIDADE_DE_REFERENCIA = 5
+
 #: Ausência de dado. Repetido aqui (também existe em `cobertura`) porque este
 #: módulo precisa reconhecê-lo sem importar o de cobertura — a dependência na
 #: direção contrária é que faria sentido, e nenhuma das duas precisa da outra.
@@ -44,6 +52,30 @@ SEM_DADOS: float = -1.0
 
 
 def _validar_fracao(valor: float, campo: str) -> None:
+    """Recusa o que não é fração de 0 a 1, dizendo qual campo e qual valor.
+
+    A comparação encadeada rejeita ``nan`` de graça — toda comparação com
+    ``nan`` é falsa —, mas a mensagem sairia dizendo "é uma fração de 0 a 1",
+    que manda procurar o valor fora da faixa. ``nan`` não está fora da faixa:
+    ele não está em faixa nenhuma, e vem de uma divisão 0/0 na leitura do
+    relatório. Nomear o caso aponta o defeito certo.
+
+    O tipo é conferido antes da faixa porque ``"0.5" <= 1.0`` levanta
+    ``TypeError`` cru, sem dizer qual campo veio como texto — e cobertura
+    chegando como texto é exatamente o que acontece quando alguém monta os
+    insumos a partir de um JSON sem converter.
+
+    O alcance da recusa é uma função, não a execução: ``jev_crap.avaliacao``
+    captura este ``ValueError`` por função medida, registra a função como sem
+    dados de cobertura e segue. Um arquivo com relatório defeituoso custa o
+    dado daquele arquivo, nunca a varredura inteira.
+    """
+    if isinstance(valor, bool) or not isinstance(valor, (int, float)):
+        raise ValueError(f"{campo} precisa ser número; recebi {valor!r}")
+    if valor != valor:
+        raise ValueError(
+            f"{campo} veio nan — provável divisão 0/0 na leitura do relatório de cobertura"
+        )
     if not 0.0 <= valor <= 1.0:
         raise ValueError(f"{campo} é uma fração de 0 a 1; recebi {valor!r}")
 
@@ -81,6 +113,25 @@ class Insumos:
     linhas_logicas: int
 
     def __post_init__(self) -> None:
+        """Confere os quatro campos assim que o objeto nasce.
+
+        Validar aqui, e não em quem calcula, é o que faz um ``Insumos`` que
+        existe ser um ``Insumos` válido: as fórmulas registradas de fora não
+        precisam repetir a conferência, e nenhuma delas pode esquecê-la.
+
+        ``complexidade`` começa em 1 porque uma função sem desvio nenhum já tem
+        um caminho. Zero indicaria que o analisador não leu a função — e o CRAP
+        de zero dá zero, ou seja, a função não medida sairia como a mais segura
+        do relatório.
+
+        Recusar aqui custa uma função, não a execução: quem mede captura este
+        ``ValueError`` por função, marca aquela como sem dados e continua. Ver
+        ``jev_crap.avaliacao.medir``.
+        """
+        if not isinstance(self.complexidade, int) or isinstance(self.complexidade, bool):
+            raise ValueError(
+                f"complexidade precisa ser inteiro; recebi {self.complexidade!r}"
+            )
         if self.complexidade < 1:
             raise ValueError(
                 f"complexidade ciclomática começa em 1 (um caminho); recebi {self.complexidade!r}"
@@ -125,24 +176,105 @@ class Formula(Protocol):
     - mais complexidade nunca diminui o risco;
     - com cobertura total, o valor não depende de qual era a cobertura antes;
     - mesma entrada, mesma saída (sem estado guardado entre chamadas).
+
+    Os corpos levantam ``NotImplementedError`` em vez de serem ``...``. A
+    diferença aparece quando alguém herda do protocolo e implementa só parte
+    dele: com ``...`` o método devolve ``None`` em silêncio, e ``None`` vira
+    risco ``None`` que atravessa o relatório inteiro até estourar na formatação,
+    longe da classe incompleta. Com o ``raise``, estoura no método que falta.
     """
 
     nome: str
 
     def calcular(self, i: Insumos) -> float:
-        """O número de risco. Maior é pior."""
-        ...
+        """O número de risco. Maior é pior. **O único método obrigatório.**
 
-    def interpretar(self, valor: float) -> str:
-        """O que esse número significa, em uma frase, para quem vai decidir o que fazer."""
-        ...
+        Quem implementa precisa respeitar as quatro propriedades listadas no
+        topo da classe — a suíte as verifica para toda fórmula registrada, sem
+        que a fórmula nova precise escrever teste para elas.
+
+        O corpo levanta em vez de ser ``...`` porque a alternativa é pior do
+        que parece: com ``...`` a chamada devolve ``None``, e ``None`` vira o
+        campo ``risco`` do relatório, atravessa o cruzamento com cobertura, a
+        ordenação e o filtro por limiar, e só estoura na formatação — a dezenas
+        de linhas e uma camada de distância da classe que esqueceu o método.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} não implementa calcular(Insumos) -> float; "
+            "é o único método obrigatório do protocolo, porque limiar_padrao e "
+            "interpretar têm implementação padrão derivada dele"
+        )
 
     def limiar_padrao(self) -> float:
-        """A partir de qual valor a função merece atenção."""
-        ...
+        """A partir de qual valor a função merece atenção.
+
+        O padrão é o risco de uma função de complexidade
+        :data:`COMPLEXIDADE_DE_REFERENCIA` sem teste nenhum, calculado pela
+        própria fórmula. Assim toda fórmula nova ganha uma linha de corte
+        coerente com a curva dela, em vez de herdar um número que só fazia
+        sentido para outra — que é como um limiar vira superstição.
+
+        Construir o ``Insumos`` faz a validação dele rodar aqui, e não seis
+        camadas adiante como um limiar estranho no meio de um relatório.
+
+        O resultado é conferido antes de sair. ``calcular`` veio de uma fórmula
+        registrada de fora e pode devolver ``nan``, infinito ou um não-número:
+        qualquer um dos três faz toda comparação ``risco >= limiar`` dar falso,
+        e a varredura termina dizendo "0 função acima do limiar" — uma saída
+        cara, plausível e completamente errada, sem mensagem de erro nenhuma.
+        Recusar aqui nomeia a fórmula culpada.
+
+        O que sobe daqui é erro de configuração, não falha em produção: o único
+        chamador é ``Config.limiar_efetivo``, que roda na montagem — antes de
+        qualquer arquivo ser medido — e as duas entradas o traduzem em erro de
+        uso (saída 3 na CLI, situação conhecida no MCP). Nenhum dado é escrito
+        nem perdido no caminho, e a fórmula que falha é sempre uma registrada
+        de fora: a que vem no pacote é coberta pela suíte.
+        """
+        sem_teste_nenhum = Insumos(
+            complexidade=COMPLEXIDADE_DE_REFERENCIA,
+            cobertura_linha=0.0,
+            cobertura_branch=None,
+            linhas_logicas=0,
+        )
+        limiar = self.calcular(sem_teste_nenhum)
+        if isinstance(limiar, bool) or not isinstance(limiar, (int, float)):
+            raise TypeError(
+                f"{self.nome}.calcular devolveu {type(limiar).__name__}; o limiar precisa "
+                "ser número, senão nenhuma função fica acima dele"
+            )
+        if not math.isfinite(limiar):
+            raise ValueError(
+                f"{self.nome}.calcular devolveu {limiar} no ponto de referência; "
+                "um limiar não finito faz toda comparação de risco dar falso"
+            )
+        return float(limiar)
+
+    def interpretar(self, valor: float) -> str:
+        """O que esse número significa, em uma frase, para quem vai decidir o que fazer.
+
+        O padrão compara com ``limiar_padrao()`` e nada mais — genérico de
+        propósito. Uma fórmula que sobrescreve isto pode explicar *por que* o
+        número subiu, que é o que separa uma métrica acionável de uma meta de
+        planilha; mas nenhuma fórmula fica sem frase nenhuma por esquecimento.
+
+        ``valor`` é conferido antes de virar texto: ``nan`` ou um não-número
+        formatados direto produzem uma recomendação com cara de confiança em
+        cima de um número que não existe.
+        """
+        if isinstance(valor, bool) or not isinstance(valor, (int, float)):
+            return f"risco não numérico ({valor!r}): a medição desta função não pode ser lida."
+        if valor != valor:
+            return "risco nan: a medição desta função não pode ser lida — trate como não medida."
+        limiar = self.limiar_padrao()
+        posicao = "acima" if valor >= limiar else "abaixo"
+        return (
+            f"{self.nome} {valor:.1f}: {posicao} do limiar {limiar:.0f}. "
+            "Esta fórmula não explica o número; veja a documentação dela."
+        )
 
 
-class CrapClassico:
+class CrapClassico(Formula):
     """CRAP original: ``cc² × (1 − cobertura_linha)³ + cc``, limiar 30.
 
     É o padrão por ser a fórmula que as pessoas conhecem e conseguem conferir
@@ -166,6 +298,13 @@ class CrapClassico:
        10100. Como não existe teto, não existe escala — a diferença de 4x entre
        eles não corresponde a 4x de nada observável, e ordenar funções por esse
        número dá peso desproporcional às poucas mais extremas.
+
+    O limiar não é redefinido aqui: o padrão do protocolo já dá 30 para esta
+    fórmula, porque 30 é exatamente o risco de uma função de complexidade
+    :data:`COMPLEXIDADE_DE_REFERENCIA` sem teste nenhum. Escrever ``30.0`` num
+    método próprio desligaria a linha de corte da curva — trocar os expoentes
+    mudaria todos os números do relatório e deixaria o limiar parado num valor
+    que não significa mais nada.
 
     4. **Ignora consequência de falha.** Um parser de configuração usado no boot
        e um formatador de mensagem de log com a mesma complexidade e a mesma
@@ -195,6 +334,17 @@ class CrapClassico:
         return round(cc**2 * descoberto**3 + cc, 1)
 
     def interpretar(self, valor: float) -> str:
+        """Uma frase sobre o número, para quem vai decidir o que fazer com ele.
+
+        ``valor`` é conferido antes de virar texto. Esta frase é a única parte
+        do relatório que alguém lê sem saber o que é CRAP, e ``nan`` ou texto
+        formatados direto produzem "CRAP nan: risco baixo" — uma recomendação
+        com aparência de confiança em cima de um número que não existe.
+        """
+        if isinstance(valor, bool) or not isinstance(valor, (int, float)):
+            return f"risco não numérico ({valor!r}): a medição desta função não pode ser lida."
+        if valor != valor:
+            return "risco nan: a medição desta função não pode ser lida — trate como não medida."
         limiar = self.limiar_padrao()
         if valor < 10.0:
             return (
@@ -213,16 +363,6 @@ class CrapClassico:
             "do que simplificar o código, porque a cobertura entra ao cubo."
         )
 
-    def limiar_padrao(self) -> float:
-        """30, o valor da ferramenta original.
-
-        É convenção, não medida: 30 é onde caem, por exemplo, complexidade 5 sem
-        teste nenhum (30.0) e complexidade 30 com cobertura total (30.0). O
-        módulo de aprendizado registra os episódios de uso justamente para que
-        esse limiar passe a sair de evidência em vez de herança.
-        """
-        return 30.0
-
 
 # Registro de fórmulas. Acrescentar uma fórmula é acrescentar uma entrada aqui
 # (ou chamar `registrar_formula`) — nada mais no módulo precisa mudar, e a
@@ -238,21 +378,64 @@ def registrar_formula(nome: str, fabrica: Callable[[], Formula]) -> None:
     Recusa sobrescrever um nome já registrado: duas fórmulas diferentes
     respondendo pelo mesmo nome fariam relatórios antigos mudarem de significado
     sem aviso.
+
+    Nome e fábrica são conferidos na entrada porque ``_REGISTRO`` é global e
+    sobrevive à chamada: um nome vazio ou uma fábrica que não é chamável só
+    falhariam na próxima execução que pedisse aquela fórmula, longe de quem
+    registrou. Registro é o lugar barato de recusar.
     """
+    if not isinstance(nome, str) or not nome.strip():
+        raise ValueError(f"nome de fórmula precisa ser texto não vazio; recebi {nome!r}")
+    if not callable(fabrica):
+        raise ValueError(
+            f"fábrica de {nome!r} precisa ser chamável e devolver uma Formula; "
+            f"recebi {type(fabrica).__name__}"
+        )
     if nome in _REGISTRO:
         raise ValueError(f"já existe fórmula registrada como {nome!r}")
     _REGISTRO[nome] = fabrica
 
 
 def formulas_disponiveis() -> tuple[str, ...]:
-    """Nomes registrados, em ordem alfabética."""
-    return tuple(sorted(_REGISTRO))
+    """Nomes registrados, em ordem alfabética.
+
+    Esta lista entra em mensagem de erro — é o que ``obter_formula`` mostra a
+    quem digitou um nome que não existe. Por isso ela não pode ser a segunda
+    falha: ``_REGISTRO`` é global e mutável, e quem escreve direto nele
+    (contornando ``registrar_formula``) pode deixar lá uma chave que não é
+    texto, sobre a qual ``sorted`` levanta ``TypeError``. Chave assim é
+    descartada aqui; a alternativa é a mensagem de erro morrer no lugar de
+    explicar o erro original.
+    """
+    nomes = [chave for chave in _REGISTRO if isinstance(chave, str)]
+    return tuple(sorted(nomes))
 
 
 def obter_formula(nome: str = "crap") -> Formula:
-    """Instancia a fórmula pelo nome. Sem argumento, a clássica do CRAP."""
-    fabrica = _REGISTRO.get(nome)
+    """Instancia a fórmula pelo nome. Sem argumento, a clássica do CRAP.
+
+    A instância é conferida contra o protocolo antes de sair. A fábrica veio de
+    fora via ``registrar_formula`` e pode devolver qualquer coisa; sem esta
+    conferência, um objeto sem ``calcular`` atravessaria a medição inteira e
+    estouraria como ``AttributeError`` dentro do laço de funções — com o nome
+    da função medida na mensagem e nenhuma pista sobre a fórmula.
+
+    Todo ``ValueError`` daqui é erro de configuração, não falha em produção:
+    ele acontece na montagem, antes de qualquer medição, e as duas entradas
+    (CLI e servidor MCP) o traduzem em "erro de uso" — saída 3 na CLI, situação
+    conhecida no MCP. Nenhum dado é escrito nem perdido no caminho.
+    """
+    fabrica = _REGISTRO.get(nome) if isinstance(nome, str) else None
     if fabrica is None:
         disponiveis = ", ".join(formulas_disponiveis())
         raise ValueError(f"fórmula de risco desconhecida: {nome!r}; disponíveis: {disponiveis}")
-    return fabrica()
+    try:
+        formula = fabrica()
+    except Exception as erro:
+        raise ValueError(f"a fábrica da fórmula {nome!r} falhou: {erro}") from erro
+    if not isinstance(formula, Formula):
+        raise ValueError(
+            f"a fábrica de {nome!r} devolveu {type(formula).__name__}, "
+            "que não cumpre o protocolo Formula (calcular, interpretar, limiar_padrao)"
+        )
+    return formula

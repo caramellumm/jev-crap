@@ -561,3 +561,34 @@ class TestRespostaRealCongelada:
         assert avaliada.faixa == "frágil"
         assert avaliada.graves == ()
         assert avaliada.veredito == "revisar"
+
+
+class TestInsumoInvalidoNaoDerrubaAVarredura:
+    """Cobertura torta num arquivo custa aquele arquivo, não a execução."""
+
+    @pytest.fixture
+    def medicao_com_um_insumo_torto(self, projeto, monkeypatch):
+        from jev_crap.metrica.risco import Insumos as InsumosReal
+
+        chamadas = {"n": 0}
+
+        def primeira_falha(**campos):
+            chamadas["n"] += 1
+            if chamadas["n"] == 1:
+                raise ValueError("cobertura_linha é uma fração de 0 a 1; recebi 1.4")
+            return InsumosReal(**campos)
+
+        monkeypatch.setattr("jev_crap.avaliacao.Insumos", primeira_falha)
+        return medir([str(projeto / "src")], config=Config(raiz=projeto))
+
+    def test_medir_segue_quando_um_insumo_e_invalido(self, medicao_com_um_insumo_torto):
+        assert medicao_com_um_insumo_torto.funcoes
+
+    def test_medir_avisa_sobre_o_insumo_invalido(self, medicao_com_um_insumo_torto):
+        avisos = medicao_com_um_insumo_torto.avisos
+        assert any("insumo de cobertura inválido" in a for a in avisos)
+
+    def test_a_funcao_com_insumo_torto_entra_sem_dados_de_cobertura(
+        self, medicao_com_um_insumo_torto
+    ):
+        assert any(f.cobertura_linha == SEM_DADOS for f in medicao_com_um_insumo_torto.funcoes)
