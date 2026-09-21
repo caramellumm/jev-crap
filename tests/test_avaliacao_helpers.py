@@ -145,20 +145,29 @@ class TestTamanho:
 
 
 class TestOuNulo:
-    """`-1.0` numa coluna de porcentagem vira conclusão errada com cara de dado."""
+    """`-1.0` numa coluna de porcentagem vira conclusão errada com cara de dado.
 
-    def test_ou_nulo_traduz_a_sentinela(self):
-        assert _ou_nulo(float(SEM_DADOS)) is None
+    Uma asserção por teste: o valor convertido, a borda do zero que é dado de
+    verdade, e a sentinela que precisa virar `null` e não número.
+    """
 
     def test_ou_nulo_preserva_valor_de_verdade(self):
+        """Resultado: meio coberto continua sendo meio coberto."""
         assert _ou_nulo(0.5) == 0.5
 
+    def test_ou_nulo_traduz_a_sentinela_em_null(self):
+        """Erro: a sentinela de ausência não pode sair como número negativo."""
+        assert _ou_nulo(float(SEM_DADOS)) is None
+
     def test_ou_nulo_preserva_zero(self):
-        """Zero é dado: nada coberto. Só a sentinela é ausência."""
+        """Borda: zero é dado — nada coberto. Só a sentinela é ausência."""
         assert _ou_nulo(0.0) == 0.0
 
     def test_ou_nulo_arredonda_para_quatro_casas(self):
         assert _ou_nulo(0.123456789) == 0.1235
+
+    def test_ou_nulo_preserva_cobertura_total(self):
+        assert _ou_nulo(1.0) == 1.0
 
 
 class TestAcimaDoLimiar:

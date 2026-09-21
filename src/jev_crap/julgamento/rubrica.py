@@ -377,11 +377,17 @@ class Rubrica:
         continuaria parecendo plausível. ``noul`` já chega em 0..1 e passa
         inteiro.
 
-        O ``RubricaInvalida`` daqui só acontece com régua de usuário mal
-        escrita: a que vem no pacote é conferida na carga, e ``_ler_dimensoes``
-        já recusa score com menos de dois níveis. Quando acontece, acontece na
-        conversão da primeira resposta — o relatório ainda não existe, nada foi
-        escrito, e as duas entradas traduzem o erro em erro de uso.
+        **O alcance de uma falha aqui é uma dimensão, não o julgamento.**
+        Quem chama é ``jev_crap.julgamento.jev._para_resposta``, que captura
+        qualquer exceção desta conversão, descarta aquela dimensão e segue com
+        as outras — o relatório prefere dez dimensões a nenhuma. A função
+        continua sendo avaliada, com a nota calculada sobre o que sobrou e o
+        peso da dimensão perdida redistribuído.
+
+        É uma conversão aritmética pura: não lê disco, não escreve, não envia
+        nada e não altera nenhum relatório anterior. E só é alcançável com
+        régua de usuário mal escrita — a que vem no pacote é conferida na
+        carga, e ``_ler_dimensoes`` já recusa score com menos de dois níveis.
         """
         dimensao = self.dimensoes[nome]
         if dimensao.tipo == "noul":
