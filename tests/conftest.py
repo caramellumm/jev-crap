@@ -132,7 +132,7 @@ def medida() -> FuncaoMedida:
 def projeto(tmp_path: Path) -> Path:
     """Um projetinho em disco: código, teste e relatório de cobertura coerentes.
 
-    Existe porque medir e cruzar cobertura são justamente os passos que só
+    Existe porque a medição e o cruzamento de cobertura são os passos que só
     quebram com arquivo de verdade — caminho, extensão e número de linha são o
     que o cruzamento usa, e nada disso se reproduz com objeto em memória.
     """

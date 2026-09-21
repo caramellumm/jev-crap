@@ -32,6 +32,63 @@ def decidida(medida, respostas, config, rubrica, limiar=30.0):
     return decidir(medida, respostas, rubrica=rubrica, config=config, limiar=limiar)
 
 
+class TestMedir:
+    """O eixo contável de ponta a ponta: mede, cruza e ordena."""
+
+    def test_medir_encontra_as_funcoes_com_arquivo_linha_e_complexidade(self, projeto):
+        medicao = medir([str(projeto / "src")], config=Config(raiz=projeto))
+        assert medicao.funcoes
+        primeira = medicao.funcoes[0]
+        assert primeira.arquivo.endswith(".py")
+        assert primeira.linha_inicio >= 1
+        assert primeira.linha_fim >= primeira.linha_inicio
+        assert primeira.complexidade >= 1
+        assert primeira.linguagem == "python"
+        assert primeira.risco >= 0
+
+    def test_medir_ordena_do_maior_risco_para_o_menor(self, projeto):
+        medicao = medir([str(projeto / "src")], config=Config(raiz=projeto))
+        riscos = [f.risco for f in medicao.funcoes]
+        assert riscos == sorted(riscos, reverse=True)
+        assert medicao.limiar == 30.0
+        assert medicao.formula.nome == "crap"
+
+    def test_medir_sem_cobertura_marca_sem_dados_e_nao_zero(self, projeto):
+        """Zero diria 'nada coberto' e puniria função sem desvio nenhum."""
+        medicao = medir([str(projeto / "src")], config=Config(raiz=projeto))
+        assert all(f.cobertura_linha == SEM_DADOS for f in medicao.funcoes)
+        assert all(f.cobertura_branch == SEM_DADOS for f in medicao.funcoes)
+        assert all(f.risco > 0 for f in medicao.funcoes)
+
+    def test_medir_avisa_quando_nao_acha_funcao(self, tmp_path):
+        (tmp_path / "leia.md").write_text("# nada de código", encoding="utf-8")
+        medicao = medir([str(tmp_path)], config=Config(raiz=tmp_path))
+        assert any("nenhuma função" in a for a in medicao.avisos)
+
+    def test_medir_traduz_cobertura_inexistente(self, projeto):
+        with pytest.raises(SituacaoConhecida, match="cobertura_inexistente"):
+            medir(
+                [str(projeto / "src")],
+                str(projeto / "nao_existe.info"),
+                config=Config(raiz=projeto),
+            )
+
+    def test_medir_usa_o_limiar_da_configuracao(self, projeto):
+        medicao = medir([str(projeto / "src")], config=Config(raiz=projeto, limiar=7.0))
+        assert medicao.limiar == 7.0
+
+    def test_medir_sem_com_codigo_nao_carrega_o_texto(self, projeto):
+        """medir_risco não precisa do código: ele não vai ao modelo."""
+        medicao = medir([str(projeto / "src")], config=Config(raiz=projeto))
+        assert all(f.codigo == "" for f in medicao.funcoes)
+
+    def test_medir_com_codigo_carrega_o_texto(self, projeto):
+        medicao = medir(
+            [str(projeto / "src")], config=Config(raiz=projeto), com_codigo=True
+        )
+        assert any(f.codigo for f in medicao.funcoes)
+
+
 class TestRegra1QueDaParaContarNaoViraPergunta:
     def test_complexidade_e_tamanho_saem_da_medicao_e_nao_do_modelo(self, projeto):
         """O número vem do lizard e do arquivo, nunca de uma resposta do modelo."""

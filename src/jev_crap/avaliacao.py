@@ -38,6 +38,7 @@ como informação é ler precisão que o modelo não tem.
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -75,6 +76,11 @@ VEREDITOS = ("aprovar", "revisar", "bloquear", "sem_julgamento")
 #: não é aprovação — é ausência de informação —, mas também não é uma dúvida
 #: levantada por evidência.
 ORDEM_DOS_VEREDITOS = ("aprovar", "sem_julgamento", "revisar", "bloquear")
+
+#: O que entra no lugar de uma contagem que não pôde ser feita. Negativo de
+#: propósito: zero seria lido como "nenhuma função acima do limiar", que é o
+#: oposto de "não consegui contar".
+SEM_CONTAGEM = -1
 
 #: O que a nota sustenta, em palavras. Ver a nota sobre calibração no topo do
 #: módulo: a faixa é a unidade real da resposta; o decimal é ruído com aparência
@@ -120,22 +126,66 @@ class FuncaoMedida:
     testes: tuple[str, ...] = ()
 
     @property
-    def chave(self) -> str:
+    def identificador(self) -> str:
         """Identificador estável: ``arquivo:linha_inicio``.
 
         Nome não serve de chave — há homônimos no mesmo arquivo e, em
         JavaScript, um monte de `(anonymous)`.
+
+        O nome é ``identificador`` e não ``chave`` de propósito: neste projeto
+        "chave" é a credencial da API, e os dois sob a mesma palavra tornam
+        impossível procurar por um sem achar o outro.
+
+        Os dois campos são conferidos antes de virar identificador. Esta string
+        identifica a função no relatório, no registro de falhas e no episódio
+        de histórico; duas funções com a mesma chave viram uma só na contagem
+        de julgadas, e o relatório sai com menos funções do que foram medidas
+        sem dizer por quê.
         """
+        if not self.arquivo.strip():
+            raise ValueError(f"função sem arquivo não tem chave estável (nome={self.nome!r})")
+        if self.linha_inicio < 1:
+            raise ValueError(
+                f"{self.arquivo}: linha_inicio é {self.linha_inicio}; linhas começam em 1"
+            )
         return f"{self.arquivo}:{self.linha_inicio}"
 
     @property
     def tamanho(self) -> int:
-        """Linhas físicas que a função ocupa, pontas incluídas."""
+        """Linhas físicas que a função ocupa, pontas incluídas.
+
+        Faixa invertida é recusada em vez de devolver número negativo. Este
+        valor vira gate: acima de ``limite_tamanho`` a função é reprovada por
+        tamanho, e tamanho negativo passa por qualquer comparação ``>`` — uma
+        função gigante com as linhas trocadas escaparia do gate justamente por
+        estar malformada.
+        """
+        if self.linha_fim < self.linha_inicio:
+            raise ValueError(
+                f"{self.arquivo}:{self.linha_inicio}: linha_fim {self.linha_fim} vem antes do "
+                "início; a faixa da função está invertida"
+            )
         return self.linha_fim - self.linha_inicio + 1
 
     def para_medicao(self) -> dict[str, Any]:
+        """A medição em formato de resposta, com as ausências como ``null``.
+
+        ``_ou_nulo`` traduz a sentinela ``SEM_DADOS`` (-1) em ``None`` para que
+        o JSON traga ``null`` e não ``-1.0``: do outro lado há um modelo lendo
+        uma coluna de porcentagem, e cobertura negativa é exatamente o tipo de
+        dado que vira conclusão errada com cara de fato.
+
+        ``trechos_de_teste`` sai como **contagem**, não como os trechos: eles já
+        foram enviados ao modelo dentro do estado e repeti-los na resposta
+        multiplicaria o tamanho do relatório sem acrescentar decisão nenhuma.
+
+        Falhar aqui não corrompe nada — é uma leitura de campos já congelados —,
+        mas ``identificador`` e ``tamanho`` conferem os próprios invariantes, então uma
+        função malformada é recusada aqui em vez de virar uma linha torta do
+        relatório.
+        """
         return {
-            "chave": self.chave,
+            "chave": self.identificador,
             "arquivo": self.arquivo,
             "funcao": self.nome,
             "linhas": [self.linha_inicio, self.linha_fim],
@@ -171,9 +221,34 @@ class FuncaoAvaliada:
 
     @property
     def faixa(self) -> str:
+        """O nome da faixa em que a nota cai — a unidade real da resposta.
+
+        Delega a :func:`faixa_da_nota`, que trata ``None`` como "sem nota" em
+        vez de "ruim": função sem julgamento e função julgada mal são coisas
+        diferentes, e o relatório precisa mostrar a diferença.
+
+        Existe como propriedade, e não como campo, justamente para não poder
+        divergir de ``nota``: guardar as duas deixaria alguém atualizar uma e
+        esquecer a outra, e o relatório sairia com nota 85 na faixa "frágil".
+        """
         return faixa_da_nota(self.nota)
 
     def para_avaliacao(self, *, com_respostas: bool = True) -> dict[str, Any]:
+        """A função medida, julgada e decidida, em formato de resposta.
+
+        Estende :meth:`FuncaoMedida.para_medicao`, e a ordem importa: os fatos
+        contáveis primeiro, depois o julgamento. Quem lê o relatório precisa
+        conseguir separar o que foi medido do que foi opinado, e um dicionário
+        que mistura os dois convida a tratar nota como medida.
+
+        ``com_respostas=False`` existe para o histórico, que guarda as notas
+        normalizadas e não o bruto da API: o bruto só faz sentido junto da
+        versão da régua que o produziu, e guardá-lo sem ela criaria uma série
+        que parece comparável e não é.
+
+        Os números são arredondados aqui, na saída, e nunca antes: arredondar
+        na hora de calcular propaga o erro para a média ponderada.
+        """
         corpo: dict[str, Any] = {
             **self.medida.para_medicao(),
             "nota": self.nota,
@@ -212,6 +287,25 @@ class Medicao:
 
     @property
     def acima_do_limiar(self) -> tuple[FuncaoMedida, ...]:
+        """As funções que passaram da linha de corte — as únicas que serão julgadas.
+
+        Este recorte é o que mantém o custo baixo: medir mil funções é grátis,
+        julgar mil não. Por isso o limiar é conferido aqui em vez de confiado:
+        ``nan`` faz **toda** comparação ``>=`` dar falso, e a varredura
+        terminaria dizendo "nenhuma função acima do limiar" — resposta cara,
+        plausível e completamente errada, sem erro nenhum na tela.
+
+        A recusa é de leitura pura: nada é escrito, nada é enviado, nenhum
+        relatório anterior muda. Ela acontece no recorte, **antes** de qualquer
+        requisição paga, e as duas entradas a traduzem em erro de uso — saída 3
+        na CLI, situação nomeada no MCP. O estrago de falhar aqui é uma
+        varredura que não começa, com a mensagem dizendo qual valor consertar.
+        """
+        if not math.isfinite(self.limiar):
+            raise ValueError(
+                f"limiar {self.limiar} não é finito; nenhuma função ficaria acima dele e a "
+                "varredura sairia vazia sem dizer por quê"
+            )
         return tuple(f for f in self.funcoes if f.risco >= self.limiar)
 
 
@@ -221,6 +315,12 @@ def _ou_nulo(valor: float) -> float | None:
     Do outro lado há um modelo lendo o relatório. ``-1.0`` numa coluna de
     porcentagem seria lido como um número, e um número negativo de cobertura é
     exatamente o tipo de coisa que vira conclusão errada com cara de dado.
+
+    É uma conversão pura, chamada na formatação da resposta: não lê disco, não
+    escreve, não envia nada e não participa de nenhuma decisão — os vereditos
+    já foram tomados sobre o valor bruto quando esta função é chamada. O pior
+    desfecho possível aqui é um campo do relatório sair com o número errado,
+    enquanto o veredito ao lado continua correto.
     """
     return None if valor == SEM_DADOS else round(valor, 4)
 
@@ -231,6 +331,19 @@ def _ou_nulo(valor: float) -> float | None:
 
 
 def _componentes(caminho: str) -> tuple[str, ...]:
+    """O caminho quebrado em componentes, sem raiz nem vazios.
+
+    A barra invertida vira barra antes da quebra porque o relatório de
+    cobertura pode ter sido gerado no Windows enquanto a medição roda no Linux:
+    sem a troca, ``src\\a.py`` seria **um** componente e não casaria com
+    ``src/a.py`` — e o arquivo apareceria como sem cobertura.
+
+    A raiz e os vazios saem porque a comparação é por sufixo: mantê-los faria
+    ``/src/a.py`` e ``src/a.py`` terem contagens diferentes para o mesmo
+    caminho relativo.
+    """
+    if not caminho:
+        return ()
     return tuple(p for p in Path(str(caminho).replace("\\", "/")).parts if p not in ("/", ""))
 
 
@@ -239,8 +352,14 @@ def _sufixo_comum(a: str, b: str) -> int:
 
     Comparar componentes inteiros, e não texto, é o que impede `cobertura.py` de
     casar com `xcobertura.py`: por texto puro um é sufixo do outro.
+
+    Caminho vazio devolve 0, e não levanta: o relatório pode trazer um registro
+    sem nome de arquivo, e nesse caso a resposta certa é "não casa com nada" —
+    não uma exceção que derruba o cruzamento de todos os outros arquivos.
     """
     pa, pb = _componentes(a), _componentes(b)
+    if not pa or not pb:
+        return 0
     n = 0
     while n < min(len(pa), len(pb)) and pa[-1 - n] == pb[-1 - n]:
         n += 1
@@ -367,91 +486,32 @@ def medir(
             f"está rodando ({Path.cwd()}); use caminho absoluto se houver dúvida.",
         ) from erro
 
-    arquivos_vistos: set[str] = set()
-    nao_casados: set[str] = set()
-    ambiguos: set[str] = set()
-    sem_branch = 0
-    insumos_invalidos: list[str] = []
-
-    medidas: list[FuncaoMedida] = []
+    cruzamento = _Cruzamento()
     textos: dict[str, list[str]] = {}
-    for bruta in brutas:
-        arquivos_vistos.add(bruta.arquivo)
-        cob, empate = _casar_arquivo(bruta.arquivo, relatorio) if relatorio else (None, False)
-        if relatorio and cob is None:
-            nao_casados.add(bruta.arquivo)
-        if empate:
-            ambiguos.add(bruta.arquivo)
-
-        if cob is None:
-            cobertura_linha = cobertura_branch = float(SEM_DADOS)
-        else:
-            cobertura_linha, cobertura_branch = mod_cobertura.cobertura_de_faixa(
-                cob, bruta.linha_inicio, bruta.linha_fim
-            )
-            if not cob.tem_dados_de_branch:
-                sem_branch += 1
-
-        # Uma função com insumo inválido não pode derrubar a varredura inteira:
-        # cobertura acima de 1 num único arquivo (LCOV somando execuções em vez
-        # de linhas distintas, por exemplo) abortaria a medição de todo o
-        # repositório. A função vira "sem dados de cobertura" e a medição segue;
-        # o aviso registra qual foi, para que o defeito do relatório apareça.
-        try:
-            insumos = Insumos(
-                complexidade=max(1, bruta.complexidade),
-                cobertura_linha=cobertura_linha,
-                cobertura_branch=None if cobertura_branch == SEM_DADOS else cobertura_branch,
-                linhas_logicas=max(0, bruta.linhas_logicas),
-            )
-        except ValueError as erro:
-            insumos_invalidos.append(f"{bruta.arquivo}:{bruta.linha_inicio} ({erro})")
-            cobertura_linha = cobertura_branch = float(SEM_DADOS)
-            insumos = Insumos(
-                complexidade=max(1, bruta.complexidade),
-                cobertura_linha=cobertura_linha,
-                cobertura_branch=None,
-                linhas_logicas=max(0, bruta.linhas_logicas),
-            )
-
-        codigo = ""
-        testes: tuple[str, ...] = ()
-        if com_codigo:
-            codigo = _trecho_do_arquivo(bruta.arquivo, bruta.linha_inicio, bruta.linha_fim, textos)
-            testes = tuple(testes_de(bruta.nome, pasta_testes))
-
-        medidas.append(
-            FuncaoMedida(
-                arquivo=bruta.arquivo,
-                nome=bruta.nome,
-                linha_inicio=bruta.linha_inicio,
-                linha_fim=bruta.linha_fim,
-                complexidade=insumos.complexidade,
-                linhas_logicas=insumos.linhas_logicas,
-                linguagem=bruta.linguagem,
-                cobertura_linha=cobertura_linha,
-                cobertura_branch=cobertura_branch,
-                risco=formula.calcular(insumos),
-                codigo=codigo,
-                testes=testes,
-            )
+    medidas = [
+        _medir_uma(
+            bruta,
+            relatorio=relatorio,
+            formula=formula,
+            cruzamento=cruzamento,
+            com_codigo=com_codigo,
+            pasta_testes=pasta_testes,
+            textos=textos,
         )
+        for bruta in brutas
+    ]
 
     avisos.extend(
-        _avisos_de_cruzamento(relatorio, arquivos_vistos, nao_casados, ambiguos, sem_branch)
+        _avisos_da_medicao(
+            relatorio=relatorio,
+            arquivos=cruzamento.arquivos,
+            nao_casados=cruzamento.nao_casados,
+            ambiguos=cruzamento.ambiguos,
+            sem_branch=cruzamento.sem_branch,
+            insumos_invalidos=cruzamento.insumos_invalidos,
+            encontrou_funcao=bool(medidas),
+        )
     )
-    if insumos_invalidos:
-        amostra = ", ".join(insumos_invalidos[:3])
-        avisos.append(
-            f"{len(insumos_invalidos)} função(ões) tiveram insumo de cobertura inválido e "
-            f"entraram como não medidas: {amostra}. Isso costuma ser defeito do relatório "
-            "(cobertura acima de 100% sai de somar execuções em vez de linhas distintas)"
-        )
-    if not medidas:
-        avisos.append(
-            "nenhuma função foi encontrada — confira se o caminho tem código em linguagem "
-            "que o lizard lê e se ele não está inteiro dentro de uma exclusão"
-        )
 
     medidas.sort(key=lambda f: (-f.risco, f.arquivo, f.linha_inicio))
     return Medicao(
@@ -460,6 +520,208 @@ def medir(
         formula=formula,
         avisos=tuple(avisos),
     )
+
+
+@dataclass
+class _Cruzamento:
+    """O que a medição acumula **por arquivo** enquanto percorre as funções.
+
+    Existe para que :func:`_medir_uma` possa registrar o que descobriu sem
+    devolver cinco valores a mais por função: os contadores aqui têm
+    cardinalidade de arquivo e de varredura, enquanto o retorno daquela função
+    tem cardinalidade de função. Passá-los pelo retorno obrigaria ``medir`` a
+    reagregar, a cada função, o que já estava agregado.
+    """
+
+    arquivos: set[str] = field(default_factory=set)
+    nao_casados: set[str] = field(default_factory=set)
+    """Arquivos que não casaram com nenhuma entrada do relatório."""
+
+    ambiguos: set[str] = field(default_factory=set)
+    """Arquivos que casaram igualmente bem com mais de uma entrada."""
+
+    sem_branch: int = 0
+    """Funções cujo arquivo não trouxe cobertura de branch."""
+
+    insumos_invalidos: list[str] = field(default_factory=list)
+    """Funções cujo insumo de cobertura foi recusado, com o motivo."""
+
+
+def _medir_uma(
+    bruta: Any,
+    *,
+    relatorio: Mapping[str, CoberturaArquivo],
+    formula: Formula,
+    cruzamento: _Cruzamento,
+    com_codigo: bool,
+    pasta_testes: str | None,
+    textos: dict[str, list[str]],
+) -> FuncaoMedida:
+    """Uma função bruta do analisador, cruzada com cobertura e pontuada.
+
+    Reúne os quatro passos que só fazem sentido juntos — casar com o relatório,
+    montar os insumos, buscar código e teste, calcular o risco — e registra em
+    ``cruzamento`` o que precisa virar aviso depois.
+
+    ``com_codigo`` decide se o texto da função e os trechos de teste são
+    carregados. ``medir_risco`` não precisa deles: nada vai ao modelo, e ler o
+    disco por função custaria tempo para produzir campos que ninguém lê. O
+    ``textos`` é o cache que faz um arquivo com trinta funções ser lido uma vez
+    e não trinta.
+
+    Nada aqui levanta por causa dos dados: cobertura que não casa vira ausência
+    registrada, insumo inválido vira ausência mais um aviso, arquivo ilegível
+    vira trecho vazio. Uma função problemática custa a própria precisão, nunca
+    a varredura.
+    """
+    cruzamento.arquivos.add(bruta.arquivo)
+    cobertura_linha, cobertura_branch = _cobertura_da_funcao(
+        bruta, relatorio, cruzamento.nao_casados, cruzamento.ambiguos
+    )
+    if cobertura_branch == SEM_DADOS and cobertura_linha != SEM_DADOS:
+        cruzamento.sem_branch += 1
+
+    insumos, cobertura_linha, cobertura_branch = _insumos_da_funcao(
+        bruta, cobertura_linha, cobertura_branch, cruzamento.insumos_invalidos
+    )
+
+    codigo = ""
+    testes: tuple[str, ...] = ()
+    if com_codigo:
+        codigo = _trecho_do_arquivo(bruta.arquivo, bruta.linha_inicio, bruta.linha_fim, textos)
+        testes = tuple(testes_de(bruta.nome, pasta_testes))
+
+    return FuncaoMedida(
+        arquivo=bruta.arquivo,
+        nome=bruta.nome,
+        linha_inicio=bruta.linha_inicio,
+        linha_fim=bruta.linha_fim,
+        complexidade=insumos.complexidade,
+        linhas_logicas=insumos.linhas_logicas,
+        linguagem=bruta.linguagem,
+        cobertura_linha=cobertura_linha,
+        cobertura_branch=cobertura_branch,
+        risco=formula.calcular(insumos),
+        codigo=codigo,
+        testes=testes,
+    )
+
+
+def _cobertura_da_funcao(
+    bruta: Any,
+    relatorio: Mapping[str, CoberturaArquivo],
+    nao_casados: set[str],
+    ambiguos: set[str],
+) -> tuple[float, float]:
+    """A cobertura da faixa de linhas da função, e o registro do que não casou.
+
+    Devolve :data:`SEM_DADOS` nos dois valores quando não há relatório ou quando
+    o arquivo não casou com nenhuma entrada dele — e a diferença entre esses
+    dois casos vai para ``nao_casados``, que vira aviso. Sem essa distinção, um
+    relatório gerado noutra raiz produziria um projeto inteiro em 0% e seria
+    lido como falta de teste, que é o diagnóstico errado.
+
+    ``ambiguos`` recebe o arquivo que casou igualmente bem com mais de uma
+    entrada: a cobertura escolhida pode ser de outro módulo de mesmo nome, e
+    quem lê precisa saber disso antes de agir sobre o número.
+
+    Os dois conjuntos são mutados de propósito, em vez de devolvidos: eles
+    acumulam por arquivo ao longo de toda a varredura, enquanto o retorno é por
+    função. Misturar as duas cardinalidades no retorno faria o chamador
+    reagregar o que já estava agregado.
+    """
+    if not relatorio:
+        return float(SEM_DADOS), float(SEM_DADOS)
+
+    cob, empate = _casar_arquivo(bruta.arquivo, relatorio)
+    if empate:
+        ambiguos.add(bruta.arquivo)
+    if cob is None:
+        nao_casados.add(bruta.arquivo)
+        return float(SEM_DADOS), float(SEM_DADOS)
+
+    cobertura_linha, cobertura_branch = mod_cobertura.cobertura_de_faixa(
+        cob, bruta.linha_inicio, bruta.linha_fim
+    )
+    if not cob.tem_dados_de_branch:
+        cobertura_branch = float(SEM_DADOS)
+    return cobertura_linha, cobertura_branch
+
+
+def _insumos_da_funcao(
+    bruta: Any,
+    cobertura_linha: float,
+    cobertura_branch: float,
+    invalidos: list[str],
+) -> tuple[Insumos, float, float]:
+    """Os insumos de risco de uma função, sem deixar um arquivo torto derrubar todos.
+
+    Cobertura acima de 1 num único arquivo — LCOV somando execuções em vez de
+    linhas distintas é a causa comum — abortaria a medição do repositório
+    inteiro. A função entra como sem dados de cobertura, o caso é registrado em
+    ``invalidos`` para virar aviso, e a varredura segue.
+
+    Devolve também a cobertura efetivamente usada, que pode ser diferente da
+    recebida: sem isso o relatório mostraria o valor recusado ao lado de um
+    risco calculado sem ele, e os dois números não se explicariam.
+    """
+    campos = {
+        "complexidade": max(1, bruta.complexidade),
+        "linhas_logicas": max(0, bruta.linhas_logicas),
+    }
+    try:
+        insumos = Insumos(
+            cobertura_linha=cobertura_linha,
+            cobertura_branch=None if cobertura_branch == SEM_DADOS else cobertura_branch,
+            **campos,
+        )
+    except ValueError as erro:
+        invalidos.append(f"{bruta.arquivo}:{bruta.linha_inicio} ({erro})")
+        cobertura_linha = cobertura_branch = float(SEM_DADOS)
+        insumos = Insumos(
+            cobertura_linha=cobertura_linha, cobertura_branch=None, **campos
+        )
+    return insumos, cobertura_linha, cobertura_branch
+
+
+def _avisos_da_medicao(
+    *,
+    relatorio: Mapping[str, CoberturaArquivo],
+    arquivos: set[str],
+    nao_casados: set[str],
+    ambiguos: set[str],
+    sem_branch: int,
+    insumos_invalidos: Sequence[str],
+    encontrou_funcao: bool,
+) -> list[str]:
+    """Tudo que muda a leitura da medição, numa lista só.
+
+    Os avisos moram juntos porque são lidos juntos, e porque a ordem entre eles
+    importa: o de cruzamento vem primeiro por ser o que mais vezes explica um
+    relatório inteiro em vermelho. Espalhá-los pelo corpo de ``medir`` fazia
+    cada um ser acrescentado longe dos outros, e o segundo a ser escrito não
+    tinha como saber que já havia um primeiro.
+
+    Nenhum deles é erro: a medição aconteceu e o resultado vale. Eles existem
+    para que o número não seja lido como o que não é — "sem cobertura" quando o
+    relatório não casou, "projeto ruim" quando faltou o branch.
+    """
+    avisos = list(
+        _avisos_de_cruzamento(relatorio, arquivos, nao_casados, ambiguos, sem_branch)
+    )
+    if insumos_invalidos:
+        amostra = ", ".join(insumos_invalidos[:3])
+        avisos.append(
+            f"{len(insumos_invalidos)} função(ões) tiveram insumo de cobertura inválido e "
+            f"entraram como não medidas: {amostra}. Isso costuma ser defeito do relatório "
+            "(cobertura acima de 100% sai de somar execuções em vez de linhas distintas)"
+        )
+    if not encontrou_funcao:
+        avisos.append(
+            "nenhuma função foi encontrada — confira se o caminho tem código em linguagem "
+            "que o lizard lê e se ele não está inteiro dentro de uma exclusão"
+        )
+    return avisos
 
 
 def _trecho_do_arquivo(
@@ -520,9 +782,32 @@ def _avisos_de_cruzamento(
 
 
 def relatorio_contavel(medicao: Medicao, config: Config) -> dict[str, Any]:
-    """O eixo contável em formato de resposta, sem nenhuma chamada de rede."""
+    """O eixo contável em formato de resposta, sem nenhuma chamada de rede.
+
+    É o que ``medir_risco`` devolve: grátis, determinístico e utilizável em CI
+    sem chave de API. O campo ``o_que_isto_nao_responde`` vai junto de propósito
+    — sem ele o número parece um veredito, e o erro mais caro que esta
+    ferramenta pode induzir é alguém refatorar código cuja complexidade é
+    essencial ao domínio porque um número mandou.
+
+    Só as funções acima do limiar são detalhadas, e ``max_no_relatorio`` corta o
+    resto: relatório com milhares de itens estoura a janela de contexto de quem
+    o lê (um modelo) e esconde justamente as poucas linhas que importam. Os
+    cortes são declarados em ``omitidas_do_relatorio``, nunca silenciosos.
+
+    Nada é escrito e nada é enviado: uma falha aqui custa a formatação de uma
+    resposta cujo cálculo já terminou, sem alterar dado nenhum. Por isso a
+    interpretação de cada número é protegida: uma fórmula registrada de fora
+    pode falhar ao explicar um valor, e a explicação de uma função não pode
+    levar junto o relatório das outras.
+    """
     acima = medicao.acima_do_limiar
-    mostradas = acima[: config.max_no_relatorio] or medicao.funcoes[: config.max_no_relatorio]
+    # O teto pode vir de configuração do usuário. Negativo fatiaria a lista
+    # pelo fim (`lista[:-3]` devolve tudo menos os três últimos), entregando um
+    # relatório que parece completo e esconde justamente as funções de maior
+    # risco — que vêm primeiro na ordenação.
+    teto = max(0, config.max_no_relatorio)
+    mostradas = acima[:teto] or medicao.funcoes[:teto]
     return {
         "resumo": {
             "funcoes_medidas": len(medicao.funcoes),
@@ -533,7 +818,7 @@ def relatorio_contavel(medicao: Medicao, config: Config) -> dict[str, Any]:
             "omitidas_do_relatorio": max(0, len(acima) - len(mostradas)),
         },
         "funcoes": [
-            {**f.para_medicao(), "interpretacao": medicao.formula.interpretar(f.risco)}
+            {**f.para_medicao(), "interpretacao": _interpretar(medicao.formula, f.risco)}
             for f in mostradas
         ],
         "avisos": list(medicao.avisos),
@@ -549,6 +834,21 @@ def relatorio_contavel(medicao: Medicao, config: Config) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 # Decidir
 # --------------------------------------------------------------------------- #
+
+
+def _interpretar(formula: Formula, risco: float) -> str:
+    """A frase da fórmula sobre um número, ou um aviso no lugar dela.
+
+    A fórmula pode ter sido registrada de fora e ``interpretar`` é o método
+    mais fácil de implementar errado — ele formata texto sobre um número que
+    pode ser qualquer coisa. Uma exceção aqui derrubaria o relatório de todas
+    as funções por causa da legenda de uma.
+    """
+    try:
+        return str(formula.interpretar(risco))
+    except Exception:  # noqa: BLE001 - legenda de uma função não derruba as outras
+        _log.warning("a fórmula %r não soube interpretar o risco %r", formula.nome, risco)
+        return f"risco {risco}: a fórmula em uso não soube explicar este número."
 
 
 def _nota_ponderada(
@@ -820,10 +1120,10 @@ def _julgar_lote(
             try:
                 avaliadas.append(tarefa.result())
             except Exception as erro:  # noqa: BLE001 - uma função não derruba o resto
-                _log.exception("falha ao julgar %s", medida.chave)
+                _log.exception("falha ao julgar %s", medida.identificador)
                 falhas.append(
                     {
-                        "funcao": f"{medida.chave} ({medida.nome})",
+                        "funcao": f"{medida.identificador} ({medida.nome})",
                         "erro": f"{type(erro).__name__}: {erro}",
                     }
                 )
@@ -836,8 +1136,15 @@ def _estimar_custo(medidas: Sequence[FuncaoMedida], config: Config) -> dict[str,
     Deliberadamente grosseiro e dito como tal: não há tabela de preço embutida,
     porque preço de API muda sem avisar e um número desatualizado no código é
     pior do que nenhum — parece autoridade.
+
+    Nunca levanta: esta estimativa acompanha um relatório que já custou tempo,
+    e nenhum número aproximado vale derrubar o resultado de verdade. Campo
+    ausente ou vazio entra como zero, que é o que uma estimativa grosseira deve
+    fazer com o que não consegue medir.
     """
-    caracteres = sum(len(m.codigo) + sum(len(t) for t in m.testes) for m in medidas)
+    caracteres = sum(
+        len(m.codigo or "") + sum(len(t or "") for t in (m.testes or ())) for m in medidas
+    )
     estimativa: dict[str, Any] = {
         "chamadas": len(medidas),
         "tokens_de_entrada_estimados": caracteres // CARACTERES_POR_TOKEN,
@@ -853,6 +1160,23 @@ def _estimar_custo(medidas: Sequence[FuncaoMedida], config: Config) -> dict[str,
 
 
 def _estado_do_eixo(julgador: Julgador, com_julgamento: bool, julgadas: int) -> dict[str, Any]:
+    """Diz se o eixo semântico respondeu, e o que muda quando não respondeu.
+
+    Sai no topo do relatório porque, sem ele, um relatório inteiro de
+    ``sem_julgamento`` é indistinguível de um relatório de código ruim. Os dois
+    motivos de desligamento são separados de propósito — escolha de quem chamou
+    (``com_julgamento=false``) e ausência de chave — porque pedem ações opostas:
+    um é intencional, o outro é configuração faltando.
+
+    ``consequencia`` acompanha o motivo em vez de ficar implícita: quem lê
+    precisa saber que "falta teste" e "precisa refatorar" produzem o mesmo
+    número no eixo contável e deixam de ser distinguíveis.
+
+    Nunca levanta: ``getattr`` com padrão cobre o julgador que não declara
+    ``ativo`` ou ``motivo``, porque este bloco explica um relatório que já foi
+    calculado — falhar aqui trocaria o relatório inteiro pela ausência da
+    legenda dele.
+    """
     if not com_julgamento:
         return {
             "ligado": False,
@@ -868,7 +1192,7 @@ def _estado_do_eixo(julgador: Julgador, com_julgamento: bool, julgadas: int) -> 
                 "o mesmo número e não são distinguíveis"
             ),
         }
-    return {"ligado": True, "funcoes_julgadas": julgadas}
+    return {"ligado": True, "funcoes_julgadas": max(0, julgadas)}
 
 
 def avaliar(
@@ -914,9 +1238,9 @@ def avaliar(
         a_julgar, julgador=julgador, rubrica=regua, config=config, limiar=medicao.limiar
     )
 
-    julgadas = {f.medida.chave for f in avaliadas}
+    julgadas = {f.medida.identificador for f in avaliadas}
     for medida in medicao.funcoes:
-        if medida.chave not in julgadas:
+        if medida.identificador not in julgadas:
             avaliadas.append(
                 decidir(
                     medida, {}, rubrica=regua, config=config, limiar=medicao.limiar
@@ -944,7 +1268,7 @@ def avaliar(
             "elas aparecem como 'sem_julgamento' e não como aprovadas"
         )
 
-    mostradas = avaliadas[: config.max_no_relatorio]
+    mostradas = avaliadas[: max(0, config.max_no_relatorio)]
     return {
         "resumo": _resumo(medicao, avaliadas, mostradas, a_julgar),
         "eixo_semantico": _estado_do_eixo(julgador, com_julgamento, len(a_julgar)),
@@ -963,14 +1287,45 @@ def _resumo(
     mostradas: Sequence[FuncaoAvaliada],
     a_julgar: Sequence[FuncaoMedida],
 ) -> dict[str, Any]:
+    """O cabeçalho do relatório: quantas, quais vereditos, quanto custou.
+
+    A contagem começa com **todos** os vereditos em zero, e não só com os que
+    apareceram. Um dicionário sem a chave ``bloquear`` obriga quem lê a
+    distinguir "nenhuma função bloqueada" de "este relatório não reporta
+    bloqueio", e é justamente aí que um CI erra para o lado errado.
+
+    ``tokens_usados`` vira ``None`` quando nada foi gasto, em vez de zerado:
+    zero diria "a chamada aconteceu e custou nada", e o fato é que não houve
+    chamada — a diferença é o que separa eixo desligado de eixo caro.
+
+    As contagens vêm de fontes diferentes de propósito: ``funcoes_medidas`` e
+    ``acima_do_limiar`` da medição, ``julgadas`` do recorte que foi realmente
+    enviado. Derivar uma da outra esconderia o teto de julgamentos, que é onde
+    o relatório e a medição deixam de bater.
+    """
     contagem: dict[str, int] = {v: 0 for v in VEREDITOS}
     for f in avaliadas:
+        if f.veredito not in contagem:
+            # Veredito fora do vocabulário só pode vir de uma versão que
+            # introduziu um valor novo. Contá-lo à parte é melhor que somá-lo a
+            # um veredito conhecido: a soma bateria e a diferença sumiria.
+            _log.warning("veredito desconhecido %r no resumo", f.veredito)
         contagem[f.veredito] = contagem.get(f.veredito, 0) + 1
-    entrada = sum(f.usage.get("input_tokens", 0) for f in avaliadas)
-    saida = sum(f.usage.get("output_tokens", 0) for f in avaliadas)
+    entrada = _somar_tokens(avaliadas, "input_tokens")
+    saida = _somar_tokens(avaliadas, "output_tokens")
+    try:
+        acima = len(medicao.acima_do_limiar)
+    except ValueError:
+        # `acima_do_limiar` recusa limiar não finito. Aqui isso já não decide
+        # nada — a varredura terminou —, e derrubar o resumo esconderia o
+        # relatório inteiro por causa de um número do cabeçalho.
+        _log.warning(
+            "limiar %r não é finito; a contagem de 'acima' sai indisponível", medicao.limiar
+        )
+        acima = SEM_CONTAGEM
     return {
         "funcoes_medidas": len(medicao.funcoes),
-        "acima_do_limiar": len(medicao.acima_do_limiar),
+        "acima_do_limiar": acima,
         "julgadas": len(a_julgar),
         "limiar": medicao.limiar,
         "formula": medicao.formula.nome,
@@ -982,15 +1337,46 @@ def _resumo(
     }
 
 
+def _somar_tokens(avaliadas: Iterable[FuncaoAvaliada], campo: str) -> int:
+    """Soma um campo de ``usage``, ignorando o que não é número.
+
+    ``usage`` vem da resposta da API e é repassado como veio. Um campo ausente,
+    nulo ou em texto derrubaria o resumo inteiro numa soma — e o resumo é o
+    cabeçalho de um relatório que já foi pago. Contagem de custo errada por
+    falta é melhor que relatório nenhum, e o valor é declarado como estimativa.
+    """
+    total = 0
+    for f in avaliadas:
+        bruto = (f.usage or {}).get(campo, 0)
+        if isinstance(bruto, bool) or not isinstance(bruto, (int, float)):
+            continue
+        if math.isfinite(bruto) and bruto > 0:
+            total += int(bruto)
+    return total
+
+
 def _pior_veredito(avaliadas: Iterable[FuncaoAvaliada]) -> str:
     """O veredito da rodada é o pior de suas funções.
 
     ``sem_julgamento`` conta como pior que ``aprovar``: o que não foi julgado
     não foi aprovado, e quem lê o resultado agregado (um CI, por exemplo)
     precisa que o silêncio não se apresente como sinal verde.
+
+    Lista vazia devolve ``aprovar``, e é a resposta certa: nenhuma função acima
+    do limiar é resultado completo ("nada a fazer agora"), não ausência de
+    resposta. Devolver ``sem_julgamento`` aqui faria todo projeto saudável sair
+    com código 1 no CI.
+
+    Veredito desconhecido vira ``revisar`` em vez de levantar. Ele só pode vir
+    de uma régua ou versão que introduziu um veredito novo, e **este valor é o
+    exit code que o CI lê**: derrubar a rodada esconderia o relatório inteiro,
+    e assumir ``aprovar`` transformaria o desconhecido em sinal verde.
     """
     pior = "aprovar"
     for f in avaliadas:
+        if f.veredito not in ORDEM_DOS_VEREDITOS:
+            _log.warning("veredito desconhecido %r; tratado como 'revisar'", f.veredito)
+            return "revisar"
         if ORDEM_DOS_VEREDITOS.index(f.veredito) > ORDEM_DOS_VEREDITOS.index(pior):
             pior = f.veredito
     return pior
