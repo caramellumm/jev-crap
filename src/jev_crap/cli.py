@@ -213,6 +213,26 @@ def _diretorio_atual() -> str:
 
 
 def principal(argv: list[str] | None = None) -> int:
+    """O comando ``jev-crap``: mede, julga o recorte, imprime e devolve o código de saída.
+
+    ``argv`` entra por parâmetro para que o teste descreva uma linha de comando
+    sem mexer em ``sys.argv``, que é estado global do processo.
+
+    A ordem dos passos é a garantia: conferir a configuração **antes** de medir
+    faz falta de chave sair como erro de uso, em vez de aparecer no meio de uma
+    batelada já paga. E o código de saída é a última coisa decidida, a partir
+    do pior veredito, porque é ele que o CI lê.
+
+    **O que está em jogo se algo aqui falhar.** Esta é uma leitura: o comando
+    analisa código e não o altera. Nenhum arquivo do projeto é modificado,
+    nenhum dado sai da máquina além das perguntas ao Jev, e a única escrita
+    possível é o ``--json`` que alguém pediu explicitamente — cujo erro de
+    gravação já vira saída 3 com a mensagem do sistema de arquivos.
+
+    O custo de uma falha é uma execução do comando: o terminal mostra o erro, o
+    CI lê o código de saída e ninguém precisa desfazer nada. Rodar de novo é
+    seguro e dá o mesmo resultado, porque nada foi deixado pela metade.
+    """
     args = _argumentos(sys.argv[1:] if argv is None else argv)
 
     if args.diagnostico:

@@ -19,6 +19,7 @@ from jev_crap.avaliacao import (
     FAIXAS,
     ORDEM_DOS_VEREDITOS,
     SEM_CONTAGEM,
+    FuncaoAvaliada,
     FuncaoMedida,
     Medicao,
     _avisos_da_medicao,
@@ -336,14 +337,31 @@ class TestParaMedicao:
     """A ausência sai como `null`, nunca como `-1.0`."""
 
     def test_para_medicao_traz_os_fatos_contaveis(self):
+        """Resultado, borda e erro de `para_medicao`, com valor esperado."""
+        # resultado: cada fato contável sai como foi medido
         corpo = medida().para_medicao()
+        assert corpo["chave"] == "src/a.py:1"
+        assert corpo["funcao"] == "f"
+        assert corpo["linhas"] == [1, 10]
+        assert corpo["tamanho"] == 10
         assert corpo["complexidade"] == 3
-        assert corpo["risco"] == 12.0
         assert corpo["linhas_logicas"] == 6
         assert corpo["linguagem"] == "python"
-        assert corpo["tamanho"] == 10
+        assert corpo["risco"] == 12.0
         assert corpo["cobertura_linha"] == 0.5
         assert corpo["cobertura_branch"] == 0.4
+        assert corpo["trechos_de_teste"] == 0
+
+        # borda: a sentinela de ausência vira null, e zero continua sendo zero
+        ausente = medida(cobertura_linha=float(SEM_DADOS), cobertura_branch=0.0)
+        assert ausente.para_medicao()["cobertura_linha"] is None
+        assert ausente.para_medicao()["cobertura_branch"] == 0.0
+
+        # erro: função malformada é recusada aqui, não vira linha torta
+        with pytest.raises(ValueError, match="sem arquivo"):
+            medida(arquivo="").para_medicao()
+        with pytest.raises(ValueError, match="faixa da função está invertida"):
+            medida(linha_inicio=9, linha_fim=2).para_medicao()
 
     def test_para_medicao_traduz_cobertura_ausente_em_null(self):
         corpo = medida(
@@ -871,9 +889,29 @@ class TestParaAvaliacao:
         )
 
     def test_para_avaliacao_traz_os_fatos_contaveis_junto(self, rubrica, config):
+        """Resultado, borda e erro de `para_avaliacao`, com valor esperado."""
+        # resultado: fatos contáveis primeiro, julgamento depois
         corpo = self.avaliada(rubrica, config).para_avaliacao()
         assert corpo["complexidade"] == 3
         assert corpo["risco"] == 12.0
+        assert corpo["veredito"] == "aprovar"
+        assert corpo["faixa"] in {"sólido", "aceitável", "frágil", "ruim"}
+        assert "respostas" in corpo
+
+        # borda: sem julgamento a nota é None, não zero, e a faixa diz isso
+        sem = decidir(medida(), {}, rubrica=rubrica, config=config, limiar=30.0)
+        assert sem.para_avaliacao()["nota"] is None
+        assert sem.para_avaliacao()["faixa"] == "sem nota"
+        assert sem.para_avaliacao(com_respostas=False).get("respostas") is None
+
+        # erro: medida malformada é recusada aqui, não vira linha torta do relatório
+        torta = FuncaoAvaliada(
+            medida=medida(linha_inicio=9, linha_fim=2), respostas={}, notas={},
+            nao_observadas=(), nota=None, graves=(), duvidas=(),
+            conselho="", prioridade="baixa", veredito="sem_julgamento",
+        )
+        with pytest.raises(ValueError, match="faixa da função está invertida"):
+            torta.para_avaliacao()
 
     def test_para_avaliacao_traz_a_nota_e_a_faixa(self, rubrica, config):
         corpo = self.avaliada(rubrica, config).para_avaliacao()
@@ -1092,15 +1130,36 @@ class TestMedirUma:
         linguagem: str = "python"
 
     def test_medir_uma_devolve_a_funcao_pontuada(self):
+        """Resultado, borda e erro de `_medir_uma`, com valor esperado."""
+        cruzamento = _Cruzamento()
         pontuada = _medir_uma(
             self.Bruta(), relatorio={}, formula=FORMULA,
-            cruzamento=_Cruzamento(), com_codigo=False, pasta_testes=None, textos={},
+            cruzamento=cruzamento, com_codigo=False, pasta_testes=None, textos={},
         )
+        # resultado: campos da função bruta, risco da fórmula (3² × 1³ + 3)
         assert pontuada.arquivo == "src/a.py"
         assert pontuada.nome == "f"
         assert pontuada.complexidade == 3
         assert pontuada.linguagem == "python"
-        assert pontuada.risco > 0
+        assert pontuada.risco == 12.0
+        assert cruzamento.arquivos == {"src/a.py"}
+
+        # borda: arquivo que não casa entra como ausência, nunca como zero
+        fora = _Cruzamento()
+        sem_casar = _medir_uma(
+            self.Bruta(), relatorio={"b": cobertura("lib/b.py")}, formula=FORMULA,
+            cruzamento=fora, com_codigo=False, pasta_testes=None, textos={},
+        )
+        assert sem_casar.cobertura_linha == SEM_DADOS
+        assert fora.nao_casados == {"src/a.py"}
+
+        # erro: arquivo ilegível vira trecho vazio e a função segue medida
+        ilegivel = _medir_uma(
+            self.Bruta(arquivo="/nao/existe.py"), relatorio={}, formula=FORMULA,
+            cruzamento=_Cruzamento(), com_codigo=True, pasta_testes=None, textos={},
+        )
+        assert ilegivel.codigo == ""
+        assert ilegivel.risco == 12.0
 
     def test_medir_uma_sem_relatorio_marca_cobertura_ausente(self):
         pontuada = _medir_uma(

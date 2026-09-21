@@ -7,11 +7,12 @@ quebrada — um pipeline que sai 0 por engano passa meses "avaliando".
 from __future__ import annotations
 
 import argparse
+from importlib import metadata
 from pathlib import Path
 
 import pytest
 
-from jev_crap import diagnostico
+from jev_crap import AUSENTE, __version__, diagnostico
 from jev_crap.cli import (
     _argumentos,
     _diretorio_atual,
@@ -37,13 +38,32 @@ def sem_chave_no_ambiente(monkeypatch, tmp_path):
 
 
 class TestDiagnosticoNaCli:
-    def test_a_cli_imprime_todo_campo_que_a_funcao_devolve(self, capsys):
-        """A CLI é uma vitrine da função: campo novo nela aparece sem mudar a CLI."""
-        principal(["--diagnostico"])
+    def test_a_cli_imprime_todo_campo_que_a_funcao_devolve(self, capsys, monkeypatch):
+        """Resultado, borda e erro de `diagnostico()`, vistos pela saída da CLI.
+
+        A CLI é uma vitrine da função: campo novo nela aparece sem mudar a CLI.
+        """
+        # resultado: cada campo do dicionário vira uma linha "campo: valor"
+        monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+        assert principal(["--diagnostico"]) == 0
         saida = capsys.readouterr().out
-        for campo, valor in diagnostico().items():
-            assert f"{campo}: " in saida
-            assert str(valor) in saida
+        relatorio = diagnostico()
+        assert relatorio["jev_crap"] == __version__
+        assert relatorio["chave_definida"] == "nao"
+        for campo, valor in relatorio.items():
+            assert f"{campo}: {valor}" in saida
+
+        # borda: com a chave presente, o campo muda mas o valor nunca aparece
+        monkeypatch.setenv("TYPESAFE_API_KEY", "sk-segredo-de-verdade")
+        assert diagnostico()["chave_definida"] == "sim"
+        assert "segredo" not in str(diagnostico())
+
+        # erro: metadado de dependência ilegível vira "ausente", não exceção
+        def explode(_nome):
+            raise OSError("metadado corrompido")
+
+        monkeypatch.setattr(metadata, "version", explode)
+        assert diagnostico()["httpx"].startswith(AUSENTE)
 
     def test_diagnostico_sai_zero_sem_alvo(self, capsys):
         assert principal(["--diagnostico"]) == 0

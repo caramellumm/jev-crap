@@ -148,6 +148,20 @@ def test_init_de_cada_classe_aceita_a_propria_entrada_valida():
     assert _Acumulador("src/a.py").arquivo == "src/a.py"
 
 
+def test_init_de_cada_classe_normaliza_as_proprias_bordas():
+    """A borda de cada `__init__`: o que ele aceita mas ajusta antes de guardar.
+
+    Uma linha por classe, como nos dois testes acima, para que os três se leiam
+    como um contrato só — erro, resultado e borda de cada construtor.
+    """
+    assert SituacaoConhecida("  a  ", "  b  ", "  c  ").situacao == "a"
+    assert Propostas(None).motivo == ""
+    assert Repositorio(None).linhas_invalidas == 0
+    assert JulgadorJev("sk-chave", max_tentativas=0)._max_tentativas == 1
+    assert Rubrica({**REGUA_MINIMA, "versao": 2}).versao == "2"
+    assert _Acumulador("src/a.py").branches == {}
+
+
 def test_init_de_cada_classe_explica_o_que_confere():
     """A regra 3: o `__init__` é onde a validação fica documentada.
 
@@ -264,3 +278,34 @@ class TestJulgadorJevNaoAbreConexao:
 
     def test_julgador_jev_eleva_max_tentativas_a_um(self):
         assert JulgadorJev("sk-chave", max_tentativas=0)._max_tentativas == 1
+
+
+def test_init_de_situacao_conhecida_valida_normaliza_e_recusa():
+    """O contrato de `SituacaoConhecida.__init__`, com resultado, borda e erro.
+
+    É o construtor mais usado do projeto — toda falha explicada passa por ele —
+    e o único cujas três partes são obrigatórias por validação, não por
+    convenção.
+    """
+    # resultado: as três partes ficam guardadas como vieram
+    erro = SituacaoConhecida("cobertura_ilegivel", "formato desconhecido", "gere com --cov")
+    assert erro.situacao == "cobertura_ilegivel"
+    assert erro.explicacao == "formato desconhecido"
+    assert erro.como_resolver == "gere com --cov"
+    assert erro.detalhes == {}
+    assert erro.args == ("cobertura_ilegivel: formato desconhecido",)
+
+    # borda: espaço nas pontas some; `#` no meio do valor sobrevive
+    limpa = SituacaoConhecida("  a  ", "  b  ", "  c#d  ", caminho="  cov.xml  ")
+    assert (limpa.situacao, limpa.explicacao, limpa.como_resolver) == ("a", "b", "c#d")
+    assert limpa.detalhes == {"caminho": "  cov.xml  "}
+
+    # erro: cada parte vazia é recusada, dizendo qual é
+    with pytest.raises(ValueError, match="situacao.*não pode ser vazio"):
+        SituacaoConhecida("", "b", "c")
+    with pytest.raises(ValueError, match="explicacao.*não pode ser vazio"):
+        SituacaoConhecida("a", "   ", "c")
+    with pytest.raises(ValueError, match="como_resolver.*não pode ser vazio"):
+        SituacaoConhecida("a", "b", "")
+    with pytest.raises(ValueError, match="precisa ser texto, veio int"):
+        SituacaoConhecida("a", 7, "c")
