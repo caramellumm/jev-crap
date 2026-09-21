@@ -7,6 +7,8 @@ daqui vira relatório plausível e errado.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import pytest
 
 from jev_crap.metrica.risco import (
@@ -464,3 +466,20 @@ class TestProtocoloFormula:
 
     def test_interpretar_do_protocolo_recusa_nao_numero(self):
         assert "não numérico" in Metade().interpretar("alto")
+
+
+@dataclass
+class FormulaMuda:
+    """Uma fórmula que calcula mas não sabe explicar o número que produziu.
+
+    É o defeito mais fácil de cometer em fórmula registrada de fora: o método
+    de explicação formata texto sobre um valor que pode ser qualquer coisa.
+    """
+
+    nome: str = "torta"
+
+    def calcular(self, insumos) -> float:
+        return 1.0
+
+    def interpretar(self, valor) -> str:
+        raise RuntimeError("não sei explicar")

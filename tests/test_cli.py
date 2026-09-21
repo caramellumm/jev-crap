@@ -35,6 +35,36 @@ def sem_chave_no_ambiente(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
 
 
+class TestDiagnosticoNaCli:
+    def test_diagnostico_sai_zero_sem_alvo(self, capsys):
+        assert principal(["--diagnostico"]) == 0
+        saida = capsys.readouterr().out
+        assert "jev_crap:" in saida
+        assert "python:" in saida
+        assert "plataforma:" in saida
+        assert "chave_definida:" in saida
+        assert "env_lido:" in saida
+
+    def test_diagnostico_lista_as_tres_dependencias(self, capsys):
+        principal(["--diagnostico"])
+        saida = capsys.readouterr().out
+        for dependencia in ("httpx", "lizard", "fastmcp"):
+            assert f"{dependencia}:" in saida
+
+    def test_diagnostico_nunca_imprime_o_valor_da_chave(self, monkeypatch, capsys):
+        """Um prefixo de segredo colado num issue público continua sendo segredo."""
+        monkeypatch.setenv("TYPESAFE_API_KEY", "sk-segredo-de-verdade")
+        principal(["--diagnostico"])
+        assert "segredo" not in capsys.readouterr().out
+
+    def test_diagnostico_nao_exige_chave(self, capsys):
+        assert principal(["--diagnostico"]) == 0
+
+    def test_sem_alvo_e_sem_diagnostico_sai_erro_de_uso(self, capsys):
+        assert principal([]) == 3
+        assert "ALVO" in capsys.readouterr().err
+
+
 class TestSelecaoDoJulgador:
     """Qual julgador a CLI monta, e o que isso muda na saída.
 
@@ -367,7 +397,7 @@ class TestArgumentos:
     def test_argumentos_recolhe_varios_alvos(self):
         assert _argumentos(["src", "lib"]).alvos == ["src", "lib"]
 
-    def test_argumentos_aceita_nenhum_alvo_para_diagnostico(self):
+    def test_argumentos_aceita_nenhum_alvo_quando_ha_flag_que_dispensa(self):
         assert _argumentos(["--diagnostico"]).alvos == []
 
     def test_argumentos_guarda_o_limiar_conferido(self):
@@ -383,16 +413,3 @@ class TestArgumentos:
 
     def test_argumentos_liga_sem_julgamento_com_a_flag(self):
         assert _argumentos(["src", "--sem-julgamento"]).sem_julgamento is True
-
-
-class TestDiagnosticoNaCli:
-    def test_diagnostico_sai_zero_sem_alvo(self, capsys):
-        assert principal(["--diagnostico"]) == 0
-        assert "jev_crap:" in capsys.readouterr().out
-
-    def test_diagnostico_nao_exige_chave(self, capsys):
-        assert principal(["--diagnostico"]) == 0
-
-    def test_sem_alvo_e_sem_diagnostico_sai_erro_de_uso(self, capsys):
-        assert principal([]) == 3
-        assert "ALVO" in capsys.readouterr().err

@@ -9,9 +9,11 @@ Nenhum desses erros aparece como erro — todos aparecem como relatório.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 
 import pytest
 from tests.conftest import RESPOSTAS_BOAS, noul, score
+from tests.test_risco import FormulaMuda
 
 from jev_crap.avaliacao import (
     FAIXAS,
@@ -53,6 +55,10 @@ from jev_crap.julgamento.jev import JulgadorDesligado, JulgadorFake
 from jev_crap.metrica.cobertura import SEM_DADOS, CoberturaArquivo
 from jev_crap.metrica.risco import obter_formula
 from jev_crap.situacoes import SituacaoConhecida
+
+#: A fórmula clássica, montada uma vez: cada teste a reusa em vez de pedir
+#: outra instância, o que também mantém os testes comparáveis entre si.
+FORMULA = obter_formula()
 
 
 def medida(**ajustes) -> FuncaoMedida:
@@ -155,13 +161,13 @@ class TestOuNulo:
 
 
 class TestAcimaDoLimiar:
-    """O recorte que mantém o custo baixo: medir é grátis, julgar não."""
+    """O recorte que mantém o custo baixo: a medição é grátis, o julgamento não."""
 
     def medicao(self, limiar: float) -> Medicao:
         return Medicao(
             funcoes=(medida(risco=5.0), medida(risco=40.0)),
             limiar=limiar,
-            formula=obter_formula(),
+            formula=FORMULA,
         )
 
     def test_acima_do_limiar_separa_pelo_risco(self):
@@ -258,9 +264,11 @@ class TestCasarArquivo:
 class TestPiorVeredito:
     """Este valor é o exit code que o CI lê."""
 
+    @dataclass
     class Fingida:
-        def __init__(self, veredito: str) -> None:
-            self.veredito = veredito
+        """Uma avaliada de mentira, só com o campo que este teste olha."""
+
+        veredito: str
 
     def test_pior_veredito_de_nada_e_aprovar(self):
         """Nada acima do limiar é resultado completo, não ausência de resposta."""
@@ -489,21 +497,23 @@ class TestEstadoDoEixo:
 class TestEscolherFuncao:
     """A mais complexa, e não a primeira: o auxiliar de duas linhas não é a pergunta."""
 
+    @dataclass
     class Fingida:
-        def __init__(self, nome, complexidade, linhas_logicas=1):
-            self.nome, self.complexidade, self.linhas_logicas = (
-                nome, complexidade, linhas_logicas
-            )
+        """Uma medida de mentira, com os três campos que a escolha compara."""
+
+        nome: str
+        complexidade: int
+        linhas_logicas: int = 1
 
     def test_escolher_funcao_de_nada_e_none(self):
         assert _escolher_funcao([], "") is None
 
     def test_escolher_funcao_pega_a_mais_complexa(self):
-        medidas = [self.Fingida("auxiliar", 1), self.Fingida("principal", 9)]
-        assert _escolher_funcao(medidas, "").nome == "principal"
+        medidas = [self.Fingida("auxiliar", 1), self.Fingida("central", 9)]
+        assert _escolher_funcao(medidas, "").nome == "central"
 
     def test_escolher_funcao_respeita_o_nome_pedido(self):
-        medidas = [self.Fingida("auxiliar", 1), self.Fingida("principal", 9)]
+        medidas = [self.Fingida("auxiliar", 1), self.Fingida("central", 9)]
         assert _escolher_funcao(medidas, "auxiliar").nome == "auxiliar"
 
     def test_escolher_funcao_aceita_nome_parcial(self):
@@ -768,7 +778,7 @@ class TestResumo:
         return Medicao(
             funcoes=(medida(risco=5.0), medida(risco=40.0)),
             limiar=30.0,
-            formula=obter_formula(),
+            formula=FORMULA,
         )
 
     def avaliada(self, rubrica, config, **ajustes):
@@ -785,7 +795,7 @@ class TestResumo:
 
     def test_resumo_marca_a_contagem_como_indisponivel_com_limiar_torto(self, rubrica, config):
         """Derrubar o resumo esconderia o relatório por um número do cabeçalho."""
-        torta = Medicao(funcoes=(medida(),), limiar=float("nan"), formula=obter_formula())
+        torta = Medicao(funcoes=(medida(),), limiar=float("nan"), formula=FORMULA)
         assert _resumo(torta, [], [], [])["acima_do_limiar"] == SEM_CONTAGEM
 
     def test_resumo_traz_todos_os_vereditos_mesmo_zerados(self, rubrica, config):
@@ -822,7 +832,7 @@ class TestRelatorioContavel:
         return Medicao(
             funcoes=(medida(risco=5.0), medida(risco=40.0)),
             limiar=30.0,
-            formula=obter_formula(),
+            formula=FORMULA,
         )
 
     def test_relatorio_contavel_traz_o_resumo(self):
@@ -900,9 +910,11 @@ class TestParaAvaliacao:
 class TestSomarTokens:
     """O resumo é o cabeçalho de um relatório que já foi pago."""
 
+    @dataclass
     class Fingida:
-        def __init__(self, usage):
-            self.usage = usage
+        """Uma avaliada de mentira, só com o `usage` que esta soma percorre."""
+
+        usage: object
 
     def test_somar_tokens_soma_o_campo(self):
         avaliadas = [self.Fingida({"input_tokens": 10}), self.Fingida({"input_tokens": 5})]
@@ -936,29 +948,17 @@ class TestInterpretar:
     """Legenda de uma função não pode derrubar o relatório das outras."""
 
     def test_interpretar_devolve_a_frase_da_formula(self):
-        assert "CRAP" in _interpretar(obter_formula(), 12.0)
+        assert "CRAP" in _interpretar(FORMULA, 12.0)
 
     def test_interpretar_sempre_devolve_texto(self):
-        assert isinstance(_interpretar(obter_formula(), 12.0), str)
+        assert isinstance(_interpretar(FORMULA, 12.0), str)
 
     def test_interpretar_nao_levanta_quando_a_formula_falha(self):
-        class Torta:
-            nome = "torta"
-
-            def interpretar(self, valor):
-                raise RuntimeError("não sei explicar")
-
-        assert "não soube explicar" in _interpretar(Torta(), 12.0)
+        assert "não soube explicar" in _interpretar(FormulaMuda(), 12.0)
 
     def test_interpretar_registra_a_formula_culpada(self, caplog):
-        class Torta:
-            nome = "torta"
-
-            def interpretar(self, valor):
-                raise RuntimeError("não sei explicar")
-
         with caplog.at_level(logging.WARNING, logger="jev_crap.avaliacao"):
-            _interpretar(Torta(), 12.0)
+            _interpretar(FormulaMuda(), 12.0)
         assert "torta" in caplog.text
 
 
@@ -1079,28 +1079,21 @@ class TestAvisosDaMedicao:
 class TestMedirUma:
     """Uma função problemática custa a própria precisão, nunca a varredura."""
 
+    @dataclass
     class Bruta:
-        def __init__(self, **ajustes):
-            campos = dict(
-                arquivo="src/a.py", nome="f", linha_inicio=1, linha_fim=2,
-                complexidade=3, linhas_logicas=2, linguagem="python",
-            )
-            self.__dict__.update({**campos, **ajustes})
+        """Uma função crua do analisador, como `medir` a recebe."""
 
-    def chamar(self, bruta=None, relatorio=None, cruzamento=None, **extras):
-        return _medir_uma(
-            bruta or self.Bruta(),
-            relatorio=relatorio or {},
-            formula=obter_formula(),
-            cruzamento=cruzamento or _Cruzamento(),
-            com_codigo=extras.get("com_codigo", False),
-            pasta_testes=extras.get("pasta_testes"),
-            textos=extras.get("textos", {}),
-        )
+        arquivo: str = "src/a.py"
+        nome: str = "f"
+        linha_inicio: int = 1
+        linha_fim: int = 2
+        complexidade: int = 3
+        linhas_logicas: int = 2
+        linguagem: str = "python"
 
     def test_medir_uma_devolve_a_funcao_pontuada(self):
         pontuada = _medir_uma(
-            self.Bruta(), relatorio={}, formula=obter_formula(),
+            self.Bruta(), relatorio={}, formula=FORMULA,
             cruzamento=_Cruzamento(), com_codigo=False, pasta_testes=None, textos={},
         )
         assert pontuada.arquivo == "src/a.py"
@@ -1111,7 +1104,7 @@ class TestMedirUma:
 
     def test_medir_uma_sem_relatorio_marca_cobertura_ausente(self):
         pontuada = _medir_uma(
-            self.Bruta(), relatorio={}, formula=obter_formula(),
+            self.Bruta(), relatorio={}, formula=FORMULA,
             cruzamento=_Cruzamento(), com_codigo=False, pasta_testes=None, textos={},
         )
         assert pontuada.cobertura_linha == SEM_DADOS
@@ -1119,47 +1112,64 @@ class TestMedirUma:
 
     def test_medir_uma_cruza_com_o_relatorio_quando_casa(self):
         pontuada = _medir_uma(
-            self.Bruta(), relatorio={"a": cobertura("src/a.py")}, formula=obter_formula(),
+            self.Bruta(), relatorio={"a": cobertura("src/a.py")}, formula=FORMULA,
             cruzamento=_Cruzamento(), com_codigo=False, pasta_testes=None, textos={},
         )
         assert pontuada.cobertura_linha == 0.5
 
     def test_medir_uma_registra_o_arquivo_visto(self):
         cruzamento = _Cruzamento()
-        self.chamar(cruzamento=cruzamento)
+        _chamar_medir_uma(self.Bruta(), cruzamento=cruzamento)
         assert cruzamento.arquivos == {"src/a.py"}
 
     def test_medir_uma_registra_quem_nao_casou(self):
         cruzamento = _Cruzamento()
-        self.chamar(relatorio={"b": cobertura("lib/b.py")}, cruzamento=cruzamento)
+        _chamar_medir_uma(
+            self.Bruta(), relatorio={"b": cobertura("lib/b.py")}, cruzamento=cruzamento
+        )
         assert cruzamento.nao_casados == {"src/a.py"}
 
     def test_medir_uma_conta_quem_ficou_sem_branch(self):
         cruzamento = _Cruzamento()
-        self.chamar(relatorio={"a": cobertura("src/a.py")}, cruzamento=cruzamento)
+        _chamar_medir_uma(
+            self.Bruta(), relatorio={"a": cobertura("src/a.py")}, cruzamento=cruzamento
+        )
         assert cruzamento.sem_branch == 1
 
     def test_medir_uma_sem_com_codigo_nao_carrega_texto(self):
         """medir_risco não precisa do código: nada vai ao modelo."""
-        assert self.chamar().codigo == ""
+        assert _chamar_medir_uma(self.Bruta()).codigo == ""
 
     def test_medir_uma_com_codigo_le_do_disco(self, tmp_path):
         alvo = tmp_path / "a.py"
         alvo.write_text("def f():\n    return 1\n", encoding="utf-8")
         bruta = self.Bruta(arquivo=str(alvo))
-        assert self.chamar(bruta=bruta, com_codigo=True).codigo.startswith("def f()")
+        assert _chamar_medir_uma(bruta, com_codigo=True).codigo.startswith("def f()")
 
     def test_medir_uma_com_arquivo_ilegivel_da_trecho_vazio(self, tmp_path):
         bruta = self.Bruta(arquivo=str(tmp_path / "nao_existe.py"))
-        assert self.chamar(bruta=bruta, com_codigo=True).codigo == ""
+        assert _chamar_medir_uma(bruta, com_codigo=True).codigo == ""
 
     def test_medir_uma_reaproveita_o_cache_de_texto(self, tmp_path):
         alvo = tmp_path / "a.py"
         alvo.write_text("def f():\n    return 1\n", encoding="utf-8")
         textos: dict[str, list[str]] = {}
         bruta = self.Bruta(arquivo=str(alvo))
-        self.chamar(bruta=bruta, com_codigo=True, textos=textos)
+        _chamar_medir_uma(bruta, com_codigo=True, textos=textos)
         assert textos
 
     def test_medir_uma_eleva_complexidade_zero_a_um(self):
-        assert self.chamar(bruta=self.Bruta(complexidade=0)).complexidade == 1
+        assert _chamar_medir_uma(self.Bruta(complexidade=0)).complexidade == 1
+
+
+def _chamar_medir_uma(bruta, relatorio=None, cruzamento=None, **extras):
+    """Chama `_medir_uma` com os padrões de teste, para o caso não interessar."""
+    return _medir_uma(
+        bruta,
+        relatorio=relatorio or {},
+        formula=FORMULA,
+        cruzamento=cruzamento or _Cruzamento(),
+        com_codigo=extras.get("com_codigo", False),
+        pasta_testes=extras.get("pasta_testes"),
+        textos=extras.get("textos", {}),
+    )

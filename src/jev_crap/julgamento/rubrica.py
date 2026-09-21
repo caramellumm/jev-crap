@@ -517,6 +517,12 @@ def _conferir_pesos(dimensoes: Mapping[str, Dimensao]) -> None:
     antes de qualquer requisição paga; lá ela protege o divisor da nota contra
     uma régua construída por outro caminho. A primeira dá a boa mensagem, a
     segunda dá a garantia.
+
+    Recusar aqui custa a execução que ainda não começou, e nada mais: é uma
+    conferência aritmética sobre uma estrutura já em memória, chamada na carga
+    da régua, antes de qualquer arquivo ser lido ou requisição paga. Nenhum
+    dado é alterado, nenhum relatório anterior muda, nada é exposto — e a
+    mensagem diz exatamente quanto os pesos somaram, que é o que se edita.
     """
     pesos = [d.peso for d in dimensoes.values() if d.grupo == GRUPO_QUALIDADE]
     if not pesos:
