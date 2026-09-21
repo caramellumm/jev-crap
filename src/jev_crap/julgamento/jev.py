@@ -199,7 +199,29 @@ class JulgadorJev:
         dormir: Any = time.sleep,
         sortear: Any = random.random,
     ) -> None:
-        self._chave = chave
+        """Guarda a configuração do transporte, sem abrir conexão nenhuma.
+
+        A chave é conferida aqui, e não na primeira chamada, porque é a
+        diferença entre falhar na montagem e falhar depois de o recorte inteiro
+        já ter sido feito: uma chave vazia produziria ``Bearer `` no cabeçalho,
+        a API responderia 401 e o diagnóstico apareceria como "erro de rede"
+        no meio de uma batelada paga.
+
+        ``max_tentativas`` é elevado a 1 em vez de recusado: zero tentativa é
+        um pedido incoerente (quem passa zero quer "não insista", e uma
+        tentativa é o mínimo que faz sentido), e recusá-lo derrubaria a
+        montagem por um valor que tem leitura óbvia.
+        """
+        if not isinstance(chave, str) or not chave.strip():
+            raise ValueError(
+                f"{VARIAVEL_DA_CHAVE} chegou vazia ao julgador; sem chave use "
+                "JulgadorDesligado, que diz por que o eixo semântico não respondeu"
+            )
+        if not isinstance(timeout, (int, float)) or timeout <= 0:
+            raise ValueError(
+                f"timeout precisa ser um número de segundos maior que zero; veio {timeout!r}"
+            )
+        self._chave = chave.strip()
         self._cliente = cliente
         self._modelo = modelo
         self._max_tentativas = max(1, max_tentativas)
@@ -283,6 +305,18 @@ class JulgadorFake:
         usage: Mapping[str, int] | None = None,
         erro: bool = False,
     ) -> None:
+        """Guarda as respostas que serão devolvidas, sem rede nenhuma.
+
+        ``respostas`` é copiado e conferido: um teste que passe uma lista ou um
+        gerador receberia um dicionário vazio em silêncio, e o teste passaria
+        pelo motivo errado — julgando "sem resposta nenhuma" em vez do cenário
+        que ele queria montar.
+        """
+        if respostas is not None and not isinstance(respostas, Mapping):
+            raise TypeError(
+                f"respostas precisa ser um mapa nome -> Resposta; "
+                f"veio {type(respostas).__name__}"
+            )
         self.respostas = dict(respostas or {})
         self.modelo = modelo
         self.usage = dict(usage or {"input_tokens": 0, "output_tokens": 0})
@@ -312,7 +346,20 @@ class JulgadorDesligado:
     ativo = False
 
     def __init__(self, motivo: str = f"{VARIAVEL_DA_CHAVE} não definida no ambiente") -> None:
-        self.motivo = motivo
+        """Guarda por que o eixo está desligado.
+
+        O motivo é obrigatório na prática, ainda que tenha padrão: ele é a
+        única coisa que este julgador entrega, e o relatório o imprime como a
+        explicação de por que não há nota. Vazio, a linha sairia como
+        "eixo semântico desligado: " e quem lê ficaria sem saber se falta
+        chave, se foi escolha, ou se algo quebrou.
+        """
+        if not isinstance(motivo, str) or not motivo.strip():
+            raise ValueError(
+                "JulgadorDesligado precisa de um motivo: é a única informação que ele "
+                "entrega, e o relatório a imprime no lugar da nota"
+            )
+        self.motivo = motivo.strip()
 
     def julgar(self, estado: Mapping[str, Any], rubrica: Rubrica) -> dict[str, Any]:
         _log.debug("eixo semântico desligado: %s", self.motivo)

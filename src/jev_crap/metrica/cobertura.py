@@ -157,6 +157,19 @@ class _Acumulador:
     """
 
     def __init__(self, arquivo: str) -> None:
+        """Abre o acumulador de um arquivo, com todas as estruturas vazias.
+
+        ``arquivo`` é a chave sob a qual tudo isto será guardado e depois
+        cruzado com a medição por sufixo de caminho. Vazio, o acumulador
+        recolheria dados de cobertura que nunca casariam com função nenhuma —
+        e o relatório sairia com todo mundo em 0%, que parece um projeto ruim
+        em vez de um relatório mal lido.
+        """
+        if not isinstance(arquivo, str) or not arquivo.strip():
+            raise ValueError(
+                "um registro de cobertura sem nome de arquivo não pode ser cruzado "
+                "com nenhuma função medida"
+            )
         self.arquivo = arquivo
         self.hits_por_linha: dict[int, int] = {}
         # (linha, bloco, branch) -> vezes executado; a chave evita contar duas

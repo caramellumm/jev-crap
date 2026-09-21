@@ -136,6 +136,19 @@ class Rubrica:
     """A régua inteira, já conferida, com as consultas que o resto do código faz."""
 
     def __init__(self, bruto: Mapping[str, Any]) -> None:
+        """Lê a régua e a confere antes de existir como objeto.
+
+        Uma ``Rubrica`` que existe é uma régua válida: os pesos já fecham, toda
+        dimensão tem grupo conhecido e texto legível. Conferir aqui, e não em
+        quem pergunta, é o que permite ao resto do código tratá-la como dado e
+        não como possibilidade — e é o que faz um erro de redação no JSON
+        aparecer na carga da régua, com o nome da dimensão, em vez de virar uma
+        pergunta malformada que a API recusa com HTTP 400.
+        """
+        if not isinstance(bruto, Mapping):
+            raise RubricaInvalida(
+                f"a régua precisa ser um objeto JSON; veio {type(bruto).__name__}"
+            )
         self.versao: str = str(bruto.get("versao", "desconhecida"))
         self.dimensoes: dict[str, Dimensao] = _ler_dimensoes(bruto)
         _conferir_pesos(self.dimensoes)

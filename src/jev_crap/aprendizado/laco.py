@@ -30,6 +30,7 @@ Três regras estão embutidas no código e valem a pena explicitar:
 
 from __future__ import annotations
 
+import math
 import statistics
 from collections import Counter
 from typing import Any
@@ -87,7 +88,23 @@ class Propostas(list):
     """
 
     def __init__(self, itens: list[dict] | None = None, motivo: str = "") -> None:
-        super().__init__(itens or [])
+        """Uma lista de propostas que também sabe dizer por que está vazia.
+
+        ``itens`` é conferido em vez de confiado: quem constrói isto a partir
+        de um JSON pode passar ``None``, um dicionário ou um gerador. Os três
+        atravessariam ``list.__init__`` — o gerador esvaziando-se em silêncio —
+        e o resultado seria uma lista de propostas vazia sem motivo, que é
+        exatamente a resposta que esta classe existe para não dar.
+        """
+        if itens is None:
+            itens = []
+        if not isinstance(itens, list):
+            raise TypeError(
+                f"Propostas recebe uma lista de propostas; veio {type(itens).__name__}"
+            )
+        if not isinstance(motivo, str):
+            raise TypeError(f"motivo precisa ser texto; veio {type(motivo).__name__}")
+        super().__init__(itens)
         self.motivo: str = motivo
 
 
@@ -96,12 +113,23 @@ def _numero(valor: Any) -> float | None:
 
     `isinstance(True, int)` é verdadeiro em Python, e um campo booleano
     escorregando para dentro de uma série de notas viraria 1.0 sem aviso.
+
+    ``nan`` e infinito também não são número de verdade para este uso: um só
+    deles numa lista faz a média de tudo virar ``nan``, e o resumo inteiro sai
+    ``nan`` sem dizer qual episódio o causou.
     """
     if isinstance(valor, bool):
         return None
-    if isinstance(valor, (int, float)):
-        return float(valor)
-    return None
+    if not isinstance(valor, (int, float)):
+        return None
+    numero = float(valor)
+    if not math.isfinite(numero):
+        # nan e infinito viriam de uma divisão degenerada lá atrás. Deixá-los
+        # entrar contamina a série inteira: a média de qualquer conjunto que
+        # contenha nan é nan, e o resumo sairia todo nan sem apontar a origem.
+        # Tratá-los como "não é número" os exclui da série, que é o que são.
+        return None
+    return numero
 
 
 def _valor_da_nota(nota: Any) -> float | None:
@@ -133,6 +161,29 @@ def _valor_da_nota(nota: Any) -> float | None:
 
 
 def _estatisticas(valores: list[float]) -> dict[str, float | int]:
+    """Resumo de uma série de notas de uma dimensão.
+
+    Lista vazia devolve um resumo com ``n=0`` e o resto nulo, e não levanta:
+    ``statistics.fmean([])`` e ``min([])`` levantam, e uma dimensão sem
+    nenhuma nota legível é normal — acontece com toda dimensão que o eixo
+    semântico não chegou a perguntar. Derrubar o resumo do histórico inteiro
+    por causa dela seria trocar a informação de todas as outras por nada.
+
+    ``n`` ser zero é o que o chamador precisa ver: as propostas exigem um
+    mínimo de notas antes de afirmar que uma dimensão não varia, e ``None``
+    nos agregados impede que "sem dado" seja lido como "amplitude zero" —
+    que é justamente o critério de remover a dimensão.
+    """
+    if not valores:
+        return {
+            "n": 0,
+            "media": None,
+            "desvio": None,
+            "minimo": None,
+            "maximo": None,
+            "amplitude": None,
+            "distintos": 0,
+        }
     return {
         "n": len(valores),
         "media": round(statistics.fmean(valores), 4),
@@ -150,12 +201,18 @@ def _limiar_vigente(eps: list[Episodio], config: dict[str, Any]) -> float | None
     O mais recente e não a média: o limiar é um valor único em vigor, e média de
     limiares antigos descreve a história da configuração, não a configuração.
     """
-    informado = config.get("limiar")
+    informado = _numero(config.get("limiar"))
     if informado is not None:
-        return float(informado)
+        return informado
+    if config.get("limiar") is not None:
+        # Veio algo que não é número (texto do JSON de configuração, quase
+        # sempre). Cair no histórico é melhor que levantar: a calibração é
+        # consultiva, e um limiar mal digitado não deve impedir de ver o que o
+        # histórico diz. O valor do histórico é o que estava de fato em vigor.
+        pass
     if not eps:
         return None
-    return max(eps, key=lambda ep: (ep.em, ep.id)).limiar_vigente
+    return _numero(max(eps, key=lambda ep: (ep.em, ep.id)).limiar_vigente)
 
 
 def agregar(eps: list[Episodio]) -> dict:
@@ -224,6 +281,35 @@ def agregar(eps: list[Episodio]) -> dict:
     }
 
 
+def _fracao_de_config(cfg: dict[str, Any], chave: str) -> float:
+    """Uma fração da configuração, caindo no padrão quando ela não serve.
+
+    A configuração chega de variável de ambiente e de JSON de cliente MCP, onde
+    todo valor pode ser texto. Levantar por causa disso derrubaria a consulta ao
+    histórico inteira; usar o padrão mantém a resposta útil, e a proposta que
+    sair continua trazendo a evidência para quem quiser conferir.
+    """
+    valor = _numero(cfg.get(chave))
+    if valor is None or valor < 0:
+        padrao = CONFIG_PADRAO[chave]
+        return float(padrao) if isinstance(padrao, (int, float)) else 0.0
+    return valor
+
+
+def _inteiro_de_config(cfg: dict[str, Any], chave: str) -> int:
+    """Um contador da configuração, caindo no padrão quando ele não serve.
+
+    Separado de :func:`_fracao_de_config` porque o arredondamento importa: um
+    mínimo de ``4.7`` episódios precisa virar 5, não 4 — arredondar para baixo
+    afrouxaria silenciosamente o critério que a configuração pediu para apertar.
+    """
+    valor = _numero(cfg.get(chave))
+    if valor is None or valor < 0:
+        padrao = CONFIG_PADRAO[chave]
+        return int(padrao) if isinstance(padrao, (int, float)) else 0
+    return math.ceil(valor)
+
+
 def _proposta(
     tipo: str,
     alvo: str,
@@ -232,6 +318,21 @@ def _proposta(
     motivo: str,
     evidencia: dict[str, Any],
 ) -> dict:
+    """Uma proposta no formato único que o servidor devolve.
+
+    Existe para que as três funções que propõem não montem cada uma o seu
+    dicionário: campo com nome diferente entre propostas obriga quem consome a
+    conhecer as três, e o primeiro esquecido só aparece no cliente.
+
+    ``motivo`` e ``evidencia`` são obrigatórios e conferidos. Uma proposta sem
+    motivo legível é um pedido para mexer na régua sem dizer por quê — e a
+    regra do módulo inteiro é que nada se aplica sozinho: o que ele entrega
+    precisa ser conferível por quem decide.
+    """
+    if not isinstance(motivo, str) or not motivo.strip():
+        raise ValueError(f"proposta {tipo!r} sem motivo legível não pode ser oferecida")
+    if not isinstance(evidencia, dict) or not evidencia:
+        raise ValueError(f"proposta {tipo!r} sem evidência não pode ser oferecida")
     return {
         "tipo": tipo,
         "alvo": alvo,
@@ -249,17 +350,26 @@ def _subir_limiar(eps: list[Episodio], limiar: float, cfg: dict[str, Any]) -> di
     limiar é 10 sugere que o limiar está baixo; ignorar um de risco 90 sugere
     outra coisa (falta de tempo, código legado intocável) e não deveria mexer na
     régua. Por isso só a vizinhança imediata do limiar entra na conta.
+
+    Os três parâmetros vêm da configuração do usuário e são lidos com padrão:
+    uma chave ausente ou com texto no lugar do número faz a proposta usar o
+    valor de ``CONFIG_PADRAO`` em vez de levantar. Calibração é consultiva —
+    devolver "nenhuma proposta, e eis por quê" vale mais que derrubar a
+    consulta inteira por uma vírgula no arquivo de configuração.
     """
-    topo = limiar * (1 + float(cfg["faixa_acima"]))
+    faixa = _fracao_de_config(cfg, "faixa_acima")
+    minimo = _inteiro_de_config(cfg, "minimo_na_faixa")
+    corte = _fracao_de_config(cfg, "proporcao_ignorada")
+    topo = limiar * (1 + faixa)
     na_faixa = [
         ep for ep in eps if ep.aceita is not None and ep.acao and limiar <= ep.risco <= topo
     ]
-    if len(na_faixa) < int(cfg["minimo_na_faixa"]):
+    if len(na_faixa) < minimo:
         return None
 
     ignorados = [ep for ep in na_faixa if not ep.aceita]
     proporcao = len(ignorados) / len(na_faixa)
-    if proporcao < float(cfg["proporcao_ignorada"]):
+    if proporcao < corte:
         return None
 
     # Um defeito dentro da faixa derruba a proposta: subir o limiar esconderia
@@ -303,7 +413,8 @@ def _baixar_limiar(eps: list[Episodio], limiar: float, cfg: dict[str, Any]) -> d
     # A folga existe porque o risco medido tem ruído (cobertura muda com o
     # tempo, complexidade muda com refatoração): colocar o limiar exatamente em
     # cima do defeito que escapou deixaria o próximo passar por milésimos.
-    para = round(menor * (1 - float(cfg["folga_ao_baixar"])), 4)
+    folga = _fracao_de_config(cfg, "folga_ao_baixar")
+    para = round(menor * (1 - folga), 4)
     return _proposta(
         tipo="baixar_limiar",
         alvo="limiar",
@@ -317,7 +428,7 @@ def _baixar_limiar(eps: list[Episodio], limiar: float, cfg: dict[str, Any]) -> d
             "defeitos_abaixo_do_limiar": len(escaparam),
             "menor_risco_com_defeito": round(menor, 4),
             "riscos": sorted(round(ep.risco, 4) for ep in escaparam),
-            "folga_aplicada": float(cfg["folga_ao_baixar"]),
+            "folga_aplicada": folga,
         },
     )
 
@@ -331,11 +442,18 @@ def _remover_dimensoes(resumo: dict, cfg: dict[str, Any]) -> list[dict]:
     pergunta esteja mal formulada e valha reescrevê-la em vez de descartá-la), e
     por isso a evidência vem junto.
     """
+    minimo_notas = _inteiro_de_config(cfg, "minimo_notas_dimensao")
+    amplitude_maxima = _fracao_de_config(cfg, "amplitude_minima")
     propostas: list[dict] = []
-    for dimensao, estatistica in resumo["variacao_dimensoes"].items():
-        if estatistica["n"] < int(cfg["minimo_notas_dimensao"]):
+    for dimensao, estatistica in resumo.get("variacao_dimensoes", {}).items():
+        if estatistica["n"] < minimo_notas:
             continue
-        if estatistica["amplitude"] > float(cfg["amplitude_minima"]):
+        amplitude = estatistica["amplitude"]
+        # Amplitude None é "não houve nota", não "a nota não variou". Sem esta
+        # distinção, toda dimensão que o eixo semântico nunca perguntou seria
+        # proposta para remoção — justamente por falta da evidência que a
+        # proposta afirma ter.
+        if amplitude is None or amplitude > amplitude_maxima:
             continue
         propostas.append(
             _proposta(
