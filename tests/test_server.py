@@ -41,9 +41,16 @@ async def cliente(servidor):
 
 
 class TestCriarServidor:
-    def test_criar_servidor_registra_as_seis_tools(self, config, rubrica):
+    async def test_criar_servidor_registra_as_seis_tools(self, config, rubrica):
+        """Conferido no objeto devolvido, não através do protocolo.
+
+        `TestSuperficie` faz a mesma pergunta ao `Client`, e as duas camadas
+        valem: uma tool esquecida no registro é indistinguível de uma tool que o
+        cliente não expõe, e só a asserção sobre o servidor recém-montado separa
+        as duas — `is not None` não separava nenhuma.
+        """
         servidor = criar_servidor(config, JulgadorDesligado(), rubrica)
-        assert servidor is not None
+        assert {tool.name for tool in await servidor.list_tools()} == TOOLS
 
     def test_criar_servidor_aceita_os_tres_por_injecao(self, config, rubrica):
         assert criar_servidor(config, JulgadorFake(), rubrica) is not None
