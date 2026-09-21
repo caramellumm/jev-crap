@@ -242,17 +242,6 @@ class TestValidacao:
             carregar_rubrica(arquivo)
 
 
-class TestNormalizacao:
-    def test_score_de_tres_niveis_vai_de_zero_a_dois(self, rubrica):
-        """Dividir por 1 aqui daria nota acima de 100 sem ninguém perceber."""
-        assert rubrica.normalizar("complexidade_cognitiva", 0.0) == 0.0
-        assert rubrica.normalizar("complexidade_cognitiva", 2.0) == 1.0
-        assert rubrica.normalizar("complexidade_cognitiva", 1.0) == 0.5
-
-    def test_noul_passa_inteiro(self, rubrica):
-        assert rubrica.normalizar("injecao", 0.63) == 0.63
-
-
 class TestPerguntaCondicional:
     def test_sem_testes_a_pergunta_sobre_teste_nao_e_feita(self, rubrica):
         perguntas = rubrica.perguntas_para({"codigo": "x", "testes": []})
@@ -283,6 +272,39 @@ class TestPerguntaCondicional:
         """
         for pergunta in rubrica.perguntas_para({"codigo": "x", "testes": ["t"]}).values():
             assert set(pergunta) <= {"type", "instructions", "criteria"}
+
+
+class TestNormalizar:
+    """A escala: um score de três níveis vai de 0 a 2, não de 0 a 1.
+
+    Uma asserção por teste, e cada uma sobre um aspecto — o valor convertido,
+    a borda do `noul` que já chega pronto, e a régua cuja escala não divide.
+    """
+
+    def test_normalizar_divide_o_score_pela_quantidade_de_niveis_menos_um(self, rubrica):
+        """Resultado: dividir por 1 daria nota acima de 100% e pareceria plausível."""
+        assert rubrica.normalizar("complexidade_cognitiva", 2.0) == 1.0
+
+    def test_normalizar_deixa_o_noul_passar_inteiro(self, rubrica):
+        """Borda: `noul` já chega em 0..1, dividir o descaracterizaria."""
+        assert rubrica.normalizar("injecao", 0.37) == 0.37
+
+    def test_normalizar_recusa_score_de_um_nivel_so(self, rubrica):
+        """Erro: dividir por zero viraria nota infinita no meio do relatório."""
+        de_um_nivel = replace(
+            rubrica.dimensoes["complexidade_cognitiva"],
+            pergunta={"type": "score", "criteria": ["único"]},
+        )
+        so_um = type("R", (), {"dimensoes": {"so_um": de_um_nivel}})()
+        with pytest.raises(RubricaInvalida, match="ao menos dois níveis"):
+            Rubrica.normalizar(so_um, "so_um", 1.0)
+
+    def test_normalizar_leva_o_meio_da_escala_para_meio(self, rubrica):
+        assert rubrica.normalizar("complexidade_cognitiva", 1.0) == 0.5
+
+    def test_normalizar_recusa_dimensao_desconhecida(self, rubrica):
+        with pytest.raises(KeyError):
+            rubrica.normalizar("inventada", 1.0)
 
 
 class TestDoGrupo:
@@ -478,33 +500,6 @@ class TestCarregarRubrica:
         alvo = tmp_path / "regua.json"
         alvo.write_text(json.dumps(MINIMA), encoding="utf-8")
         assert carregar_rubrica(str(alvo)).versao == "teste"
-
-
-class TestNormalizar:
-    """A escala: um score de três níveis vai de 0 a 2, não de 0 a 1."""
-
-    def test_normalizar_divide_score_pelos_niveis_menos_um(self, rubrica):
-        assert rubrica.normalizar("complexidade_cognitiva", 2.0) == 1.0
-
-    def test_normalizar_leva_o_meio_da_escala_para_meio(self, rubrica):
-        assert rubrica.normalizar("complexidade_cognitiva", 1.0) == 0.5
-
-    def test_normalizar_deixa_noul_passar_inteiro(self, rubrica):
-        assert rubrica.normalizar("injecao", 0.37) == 0.37
-
-    def test_normalizar_recusa_dimensao_desconhecida(self, rubrica):
-        with pytest.raises(KeyError):
-            rubrica.normalizar("inventada", 1.0)
-
-    def test_normalizar_recusa_score_de_um_nivel_so(self, rubrica):
-        de_um_nivel = replace(
-            rubrica.dimensoes["complexidade_cognitiva"],
-            pergunta={"type": "score", "criteria": ["único"]},
-        )
-        with pytest.raises(RubricaInvalida, match="ao menos dois níveis"):
-            Rubrica.normalizar(
-                type("R", (), {"dimensoes": {"so_um": de_um_nivel}})(), "so_um", 1.0
-            )
 
 
 class TestPerguntasPara:

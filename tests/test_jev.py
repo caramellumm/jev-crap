@@ -103,7 +103,7 @@ class TestMontarEstado:
         assert montar_estado("x", "")["linguagem"] == "desconhecida"
 
 
-def _escala_degenerada(_nome, _valor):
+def _escala_degenerada(*_a, **_k):
     """Uma régua cuja conversão de escala estoura — dimensão descartada, não o resto."""
     raise ZeroDivisionError("régua com escala degenerada")
 
@@ -539,7 +539,7 @@ class TestParaResposta:
         assert _para_resposta(bruta, rubrica, "injecao").confianca is None
 
     def test_para_resposta_descarta_a_dimensao_se_a_escala_falhar(self, rubrica, monkeypatch):
-        monkeypatch.setattr(rubrica, "normalizar", _escala_degenerada)
+        monkeypatch.setattr(type(rubrica), "normalizar", _escala_degenerada)
         assert _para_resposta({"noul": 0.2}, rubrica, "injecao") is None
 
     def test_para_resposta_guarda_as_probabilidades_quando_vierem(self, rubrica):

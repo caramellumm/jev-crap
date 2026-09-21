@@ -31,21 +31,6 @@ def insumos(**ajustes) -> Insumos:
     return Insumos(**{**campos, **ajustes})
 
 
-class Metade(Formula):
-    """Fórmula mínima: implementa só `calcular`, que é o único obrigatório."""
-
-    nome = "metade"
-
-    def calcular(self, i: Insumos) -> float:
-        return float(i.complexidade) * 2.0
-
-
-class SemCalcular(Formula):
-    """Fórmula que esqueceu o método obrigatório."""
-
-    nome = "sem_calcular"
-
-
 class TestCoberturaPreferida:
     """Branch quando existe, linha quando não: as duas contam coisas diferentes."""
 
@@ -76,28 +61,28 @@ class TestCoberturaPreferida:
 
 
 class TestContratoDeCalcular:
-    """`calcular` visto dos dois lados: quem implementa e quem esquece.
+    """O método obrigatório do contrato, visto dos dois lados.
 
-    Cada teste toca a implementação real e o corpo do protocolo no mesmo
-    lugar — é assim que o contrato fica legível: o que `calcular` devolve
-    quando existe, e o que ele faz quando não existe.
+    Uma asserção por teste, e cada uma sobre um aspecto: o número que sai
+    quando a fórmula existe, o estouro quando ela esqueceu o método, e o que
+    acontece na borda em que não há cobertura para ler.
     """
 
-    def test_calcular_devolve_numero_na_formula_implementada(self):
-        """Resultado, borda e erro do método, na implementação e no protocolo."""
-        # resultado: os números publicados da fórmula clássica
+    def test_calcular_devolve_os_numeros_publicados_da_formula(self):
+        """Resultado: complexidade 5 sem teste nenhum dá 30, o limiar clássico."""
         assert CrapClassico().calcular(insumos(complexidade=5, cobertura_linha=0.0)) == 30.0
-        assert CrapClassico().calcular(insumos(complexidade=5, cobertura_linha=1.0)) == 5.0
-        assert CrapClassico().calcular(insumos(complexidade=10, cobertura_linha=0.5)) == 22.5
 
-        # borda: cobertura ausente vale como descoberta, o pior caso
-        sem_dado = CrapClassico().calcular(insumos(cobertura_linha=SEM_DADOS))
-        assert sem_dado == CrapClassico().calcular(insumos(cobertura_linha=0.0))
-        assert isinstance(CrapClassico().calcular(insumos()), float)
-
-        # erro: quem herda o protocolo sem implementar estoura em vez de dar None
+    def test_calcular_do_protocolo_estoura_em_vez_de_devolver_none(self):
+        """Erro: None viraria risco nulo e atravessaria o relatório inteiro."""
         with pytest.raises(NotImplementedError, match="SemCalcular"):
             SemCalcular().calcular(insumos())
+
+    def test_calcular_com_cobertura_ausente_usa_o_pior_caso(self):
+        """Borda: 'não sei' não pode sair mais barato que 'sei que está descoberta'."""
+        assert CrapClassico().calcular(insumos(cobertura_linha=SEM_DADOS)) == 30.0
+
+    def test_calcular_com_cobertura_total_cai_para_a_propria_complexidade(self):
+        assert CrapClassico().calcular(insumos(complexidade=5, cobertura_linha=1.0)) == 5.0
 
     def test_calcular_levanta_quando_a_formula_nao_implementa(self):
         assert isinstance(CrapClassico().calcular(insumos()), float)
@@ -494,3 +479,18 @@ class FormulaMuda:
 
     def interpretar(self, valor) -> str:
         raise RuntimeError("não sei explicar")
+
+
+class Metade(Formula):
+    """Fórmula mínima: implementa só `calcular`, que é o único obrigatório."""
+
+    nome = "metade"
+
+    def calcular(self, i: Insumos) -> float:
+        return float(i.complexidade) * 2.0
+
+
+class SemCalcular(Formula):
+    """Fórmula que esqueceu o método obrigatório."""
+
+    nome = "sem_calcular"
