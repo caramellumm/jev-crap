@@ -25,7 +25,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from jev_crap import __version__, avaliacao
+from jev_crap import __version__, avaliacao, diagnostico
 from jev_crap.ambiente import ARQUIVO_ENV, carregar_env
 from jev_crap.config import Config
 from jev_crap.julgamento.jev import VARIAVEL_DA_CHAVE, obter_julgador
@@ -51,7 +51,7 @@ def _argumentos(argv: list[str]) -> argparse.Namespace:
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    p.add_argument("alvos", nargs="+", metavar="ALVO", help="arquivos ou pastas a avaliar")
+    p.add_argument("alvos", nargs="*", metavar="ALVO", help="arquivos ou pastas a avaliar")
     p.add_argument("--cobertura", metavar="REL", help="relatório LCOV (.info) ou Cobertura XML")
     p.add_argument("--testes", metavar="DIR", help="pasta onde estão os testes")
     p.add_argument("--limiar", type=float, metavar="N",
@@ -61,6 +61,8 @@ def _argumentos(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--json", metavar="ARQ", help="grava o relatório completo neste arquivo")
     p.add_argument("--quieto", action="store_true", help="só o resultado final")
     p.add_argument("--version", action="version", version=f"jev-crap {__version__}")
+    p.add_argument("--diagnostico", action="store_true",
+                   help="imprime versão, ambiente e dependências, e sai")
     return p.parse_args(argv)
 
 
@@ -109,6 +111,28 @@ def _sem_chave(env: Path | None) -> str:
 
 def principal(argv: list[str] | None = None) -> int:
     args = _argumentos(sys.argv[1:] if argv is None else argv)
+
+    if args.diagnostico:
+        # Sem exigir ALVO: o diagnóstico serve justamente para quando a
+        # ferramenta não está rodando, e pedir alvo para imprimi-lo faria a
+        # única saída útil depender do que está quebrado.
+        #
+        # O `.env` é lido antes de perguntar pela chave, senão o diagnóstico
+        # diria "chave_definida: nao" para quem tem um `.env` correto na raiz —
+        # que é o diagnóstico errado e manda consertar o que já está certo.
+        arquivo_env = carregar_env()
+        linhas = dict(diagnostico())
+        linhas["env_lido"] = str(arquivo_env) if arquivo_env else f"nenhum {ARQUIVO_ENV}"
+        for campo, valor in linhas.items():
+            print(f"{campo}: {valor}")
+        return 0
+
+    if not args.alvos:
+        # `nargs="*"` existe só para liberar `--diagnostico` sem alvo; fora
+        # desse caso, alvo continua obrigatório e a falta dele é erro de uso.
+        print("informe ao menos um ALVO (arquivo ou pasta), ou use --diagnostico",
+              file=sys.stderr)
+        return ERRO_DE_USO
 
     env = carregar_env()
     config = Config.do_ambiente()
